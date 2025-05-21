@@ -1,4 +1,4 @@
-run = "python app.py"
+run = "python3 init_db.py && python3 init_test_data.py && python3 app.py"
 hidden = [".config", "package.json", "package-lock.json"]
 ignore = [".venv", "venv", "__pycache__", "*.pyc"]
 
