@@ -35,6 +35,26 @@ def get_db():
     db.row_factory = sqlite3.Row
     return db
 
+def init_db_if_needed():
+    """Initialize database if it doesn't exist or is empty"""
+    try:
+        db = get_db()
+        # Check if customers table exists
+        cursor = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='customers'")
+        if not cursor.fetchone():
+            print("Initializing database...")
+            # Import and run init_db
+            from init_db import init_db
+            init_db()
+            # Import and run init_test_data
+            from init_test_data import init_test_data
+            init_test_data()
+            print("Database initialized successfully!")
+        db.close()
+    except Exception as e:
+        print(f"Error initializing database: {e}")
+        raise
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -330,6 +350,18 @@ def simulate_modem_reboot(customer_id):
     db.close()
 
 if __name__ == '__main__':
+    print("\n" + "="*50)
+    print("Zen Cable Customer Portal")
+    print("="*50)
+    print("\n=== Test Account Credentials ===")
+    print("Email: test@example.com")
+    print("Password: password123")
+    print("==============================\n")
     print(f"Starting server on {HOST}:{PORT}")
     print(f"Debug mode: {DEBUG}")
+    print("="*50 + "\n")
+    
+    # Initialize database if needed
+    init_db_if_needed()
+    
     app.run(host=HOST, port=PORT, debug=DEBUG) 
