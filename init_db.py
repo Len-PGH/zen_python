@@ -27,6 +27,7 @@ def init_db():
             name TEXT NOT NULL,
             description TEXT,
             price DECIMAL(10,2) NOT NULL,
+            type TEXT NOT NULL,
             status TEXT DEFAULT 'active'
         )
     ''')

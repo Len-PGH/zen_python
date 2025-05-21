@@ -1,10 +1,10 @@
-Flask==3.0.0
-python-dotenv==1.0.0
-signalwire>=2.1.1
-signalwire-swaig>=2.7.2
-schedule==1.2.1
-pytz==2023.3
+Flask==3.0.2
+python-dotenv==1.0.1
+signalwire==2.3.0
+signalwire-swaig==0.1.0
 requests==2.31.0
+schedule==1.2.1
+pytz==2024.1
 Werkzeug==3.0.1
 Jinja2==3.1.2
 itsdangerous==2.1.2
