@@ -140,6 +140,20 @@ def init_db():
         )
     ''')
 
+    # <-- New service_history table -->
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS service_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            service_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            action_date DATE NOT NULL,
+            notes TEXT,
+            FOREIGN KEY (customer_id) REFERENCES customers (id),
+            FOREIGN KEY (service_id) REFERENCES services (id)
+        )
+    ''')
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS password_resets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
