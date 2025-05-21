@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 def init_test_data():
     db = sqlite3.connect('zen_cable.db')
     cursor = db.cursor()
-    
+
     # Add test services
     services = [
         ('Basic Cable', 'Basic cable package with 100+ channels', 49.99, 'cable'),
@@ -17,16 +17,16 @@ def init_test_data():
         VALUES (?, ?, ?, ?)
         ''', services
     )
-    
+
     # Get the test customer
     customer = cursor.execute(
         'SELECT id FROM customers WHERE email = ?',
         ('test@example.com',)
     ).fetchone()
-    
+
     if customer:
         customer_id = customer[0]
-        
+
         # Add active services for the customer
         cursor.execute(
             '''
@@ -42,7 +42,7 @@ def init_test_data():
             VALUES (?, 2, 'active', CURRENT_TIMESTAMP)
             ''', (customer_id,)
         )
-        
+
         # Add a modem
         cursor.execute(
             '''
@@ -51,18 +51,18 @@ def init_test_data():
             VALUES (?, '00:11:22:33:44:55', 'DOCSIS 3.1', 'online', CURRENT_TIMESTAMP)
             ''', (customer_id,)
         )
-        
+
         # Add current and past billing
         current_date = datetime.now()
         due_date = current_date + timedelta(days=15)
-        
+
         cursor.execute(
             '''
             INSERT OR IGNORE INTO billing (customer_id, amount, due_date, status)
             VALUES (?, 89.98, ?, 'pending')
             ''', (customer_id, due_date.strftime('%Y-%m-%d'))
         )
-        
+
         past_billing = [
             (customer_id, 89.98, (current_date - timedelta(days=days)).strftime('%Y-%m-%d'), 'paid')
             for days in (30, 60, 90)
@@ -73,7 +73,7 @@ def init_test_data():
             VALUES (?, ?, ?, ?)
             ''', past_billing
         )
-        
+
         # Add past payments
         past_payments = []
         for days, method, trx in [(25, 'credit_card', 'TRX001'),
@@ -81,7 +81,7 @@ def init_test_data():
                                   (85, 'bank_transfer', 'TRX003')]:
             date_str = (current_date - timedelta(days=days)).strftime('%Y-%m-%d')
             past_payments.append((customer_id, 89.98, date_str, method, 'completed', trx))
-        
+
         cursor.executemany(
             '''
             INSERT OR IGNORE INTO payments 
@@ -89,7 +89,7 @@ def init_test_data():
             VALUES (?, ?, ?, ?, ?, ?)
             ''', past_payments
         )
-        
+
         # Add appointments
         appointments = []
         for desc, status, offset in [('installation', 'completed', -120),
@@ -121,7 +121,7 @@ def init_test_data():
             VALUES (?, ?, ?, ?, ?)
             ''', service_history
         )
-    
+
     db.commit()
     db.close()
 

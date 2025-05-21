@@ -53,8 +53,8 @@ log/
 .env.production.local
 
 # Replit
-.replit
-.replit.nix
+## .replit
+## .replit.nix
 
 # Coverage reports
 htmlcov/

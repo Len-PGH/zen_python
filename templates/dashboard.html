@@ -30,27 +30,17 @@
       display: inline-block;
       vertical-align: middle;
     }
-    /* dot & text colors must match */
-    .status-indicator.online,
-    .online {
-      background-color: #28a745;
-      color: #28a745;
-    }
-    .status-indicator.offline,
-    .offline {
-      background-color: #dc3545;
-      color: #dc3545;
-    }
-    .status-indicator.rebooting,
-    .rebooting {
-      background-color: #ffc107;
-      color: #ffc107;
-    }
-    .status-indicator.initializing,
-    .initializing {
-      background-color: #17a2b8;
-      color: #17a2b8;
-    }
+    /* dot colors */
+    .status-indicator.online       { background-color: #28a745; }
+    .status-indicator.offline      { background-color: #dc3545; }
+    .status-indicator.rebooting    { background-color: #ffc107; }
+    .status-indicator.initializing { background-color: #17a2b8; }
+
+    /* text colors, transparent background */
+    .online       { color: #28a745; background-color: transparent; }
+    .offline      { color: #dc3545; background-color: transparent; }
+    .rebooting    { color: #ffc107; background-color: transparent; }
+    .initializing { color: #17a2b8; background-color: transparent; }
   </style>
 </head>
 <body class="bg-dark text-light">
