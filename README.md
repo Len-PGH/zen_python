@@ -89,8 +89,31 @@ SIGNALWIRE_SPACE=your_space
 ### Replit Deployment
 
 1. Import the project into Replit
-2. The app will automatically configure for Replit's environment
-3. Set up environment variables in Replit's Secrets tab
+2. Configure the run command in `.replit`:
+   ```toml
+   run = "python app.py"
+   ```
+3. Set up environment variables in Replit's Secrets tab:
+   - `HOST`: `0.0.0.0`
+   - `PORT`: `8080`
+   - `FLASK_ENV`: `development`
+   - `SIGNALWIRE_PROJECT_ID`: Your SignalWire project ID
+   - `SIGNALWIRE_TOKEN`: Your SignalWire token
+   - `SIGNALWIRE_SPACE`: Your SignalWire space
+
+4. Initialize the database:
+   ```bash
+   # In Replit shell
+   python init_db.py
+   python init_test_data.py
+   ```
+
+5. Click the "Run" button or use the shell:
+   ```bash
+   python app.py
+   ```
+
+The app will be available at your Replit URL (e.g., `https://your-repl-name.your-username.repl.co`)
 
 ## Usage
 

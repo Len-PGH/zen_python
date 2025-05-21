@@ -4,127 +4,164 @@ import secrets
 
 def init_db():
     db = sqlite3.connect('zen_cable.db')
-    cursor = db.cursor()
+    db.row_factory = sqlite3.Row
     
-    # Create tables
-    cursor.executescript('''
-        -- Customers table
+    # Create customers table
+    db.execute('''
         CREATE TABLE IF NOT EXISTS customers (
-            id INTEGER PRIMARY KEY,
-            first_name TEXT NOT NULL,
-            last_name TEXT NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
             phone TEXT NOT NULL,
-            address TEXT NOT NULL,
-            account_number TEXT UNIQUE NOT NULL,
+            address TEXT,
             password_hash TEXT NOT NULL,
             password_salt TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- Password Resets table
+        )
+    ''')
+    
+    # Create services table
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            price DECIMAL(10,2) NOT NULL,
+            status TEXT DEFAULT 'active'
+        )
+    ''')
+    
+    # Create customer_services table
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS customer_services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            service_id INTEGER NOT NULL,
+            status TEXT DEFAULT 'active',
+            start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            end_date TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers (id),
+            FOREIGN KEY (service_id) REFERENCES services (id)
+        )
+    ''')
+    
+    # Create modems table
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS modems (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            mac_address TEXT NOT NULL,
+            model TEXT,
+            status TEXT DEFAULT 'online',
+            last_seen TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers (id)
+        )
+    ''')
+    
+    # Create billing table
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS billing (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            amount DECIMAL(10,2) NOT NULL,
+            due_date DATE NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers (id)
+        )
+    ''')
+    
+    # Create payments table
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            amount DECIMAL(10,2) NOT NULL,
+            payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            payment_method TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            transaction_id TEXT UNIQUE,
+            FOREIGN KEY (customer_id) REFERENCES customers (id)
+        )
+    ''')
+    
+    # Create technicians table
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS technicians (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            status TEXT DEFAULT 'active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Create appointments table with enhanced fields
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS appointments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            technician_id INTEGER,
+            type TEXT NOT NULL,
+            status TEXT DEFAULT 'scheduled',
+            start_time TIMESTAMP NOT NULL,
+            end_time TIMESTAMP NOT NULL,
+            notes TEXT,
+            priority TEXT DEFAULT 'medium',
+            location TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers (id),
+            FOREIGN KEY (technician_id) REFERENCES technicians (id)
+        )
+    ''')
+    
+    # Create appointment_history table
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS appointment_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            appointment_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            details TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (appointment_id) REFERENCES appointments (id)
+        )
+    ''')
+    
+    # Create appointment_reminders table
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS appointment_reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            appointment_id INTEGER NOT NULL,
+            reminder_type TEXT NOT NULL,
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'pending',
+            error_message TEXT,
+            FOREIGN KEY (appointment_id) REFERENCES appointments (id)
+        )
+    ''')
+    
+    # Create password_resets table
+    db.execute('''
         CREATE TABLE IF NOT EXISTS password_resets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_id INTEGER NOT NULL,
             token TEXT UNIQUE NOT NULL,
             expiry TIMESTAMP NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (customer_id) REFERENCES customers(id)
-        );
-
-        -- Services table
-        CREATE TABLE IF NOT EXISTS services (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            description TEXT,
-            price DECIMAL(10,2) NOT NULL,
-            type TEXT NOT NULL CHECK(type IN ('cable', 'internet', 'phone'))
-        );
-
-        -- Customer Services (subscriptions)
-        CREATE TABLE IF NOT EXISTS customer_services (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            customer_id INTEGER,
-            service_id INTEGER,
-            status TEXT NOT NULL CHECK(status IN ('active', 'suspended', 'cancelled')),
-            start_date TIMESTAMP NOT NULL,
-            end_date TIMESTAMP,
-            FOREIGN KEY (customer_id) REFERENCES customers(id),
-            FOREIGN KEY (service_id) REFERENCES services(id)
-        );
-
-        -- Modems table
-        CREATE TABLE IF NOT EXISTS modems (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            customer_id INTEGER,
-            mac_address TEXT UNIQUE NOT NULL,
-            model TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('online', 'offline', 'rebooting')),
-            last_seen TIMESTAMP,
-            FOREIGN KEY (customer_id) REFERENCES customers(id)
-        );
-
-        -- Appointments table
-        CREATE TABLE IF NOT EXISTS appointments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            customer_id INTEGER,
-            type TEXT NOT NULL CHECK(type IN ('installation', 'repair', 'upgrade', 'modem_swap')),
-            status TEXT NOT NULL CHECK(status IN ('scheduled', 'in_progress', 'completed', 'cancelled')),
-            start_time TIMESTAMP NOT NULL,
-            end_time TIMESTAMP NOT NULL,
-            notes TEXT,
-            FOREIGN KEY (customer_id) REFERENCES customers(id)
-        );
-
-        -- Payments table
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            customer_id INTEGER,
-            amount DECIMAL(10,2) NOT NULL,
-            payment_date TIMESTAMP NOT NULL,
-            payment_method TEXT NOT NULL CHECK(payment_method IN ('credit_card', 'debit_card', 'bank_transfer', 'phone')),
-            status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed')),
-            transaction_id TEXT UNIQUE,
-            FOREIGN KEY (customer_id) REFERENCES customers(id)
-        );
-
-        -- Billing table
-        CREATE TABLE IF NOT EXISTS billing (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            customer_id INTEGER,
-            amount DECIMAL(10,2) NOT NULL,
-            due_date TIMESTAMP NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('pending', 'paid', 'overdue')),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (customer_id) REFERENCES customers(id)
-        );
-
-        -- Service History table
-        CREATE TABLE IF NOT EXISTS service_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            customer_id INTEGER,
-            service_id INTEGER,
-            action TEXT NOT NULL CHECK(action IN ('added', 'removed', 'modified')),
-            action_date TIMESTAMP NOT NULL,
-            notes TEXT,
-            FOREIGN KEY (customer_id) REFERENCES customers(id),
-            FOREIGN KEY (service_id) REFERENCES services(id)
-        );
+            FOREIGN KEY (customer_id) REFERENCES customers (id)
+        )
     ''')
-    
-    # Create test customer
-    password = 'password123'
-    salt = secrets.token_hex(16)
-    password_hash = hashlib.sha256((password + salt).encode()).hexdigest()
-    
-    cursor.execute('''
-        INSERT OR IGNORE INTO customers 
-        (first_name, last_name, email, phone, address, account_number, password_hash, password_salt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', ('Test', 'User', 'test@example.com', '555-0123', '123 Test St', 'ACC123456', password_hash, salt))
     
     db.commit()
     db.close()
+
+    # Print test credentials
+    print("\n=== Test Account Credentials ===")
+    print("Email: test@example.com")
+    print("Password: password123")
+    print("==============================\n")
 
 if __name__ == '__main__':
     init_db()
