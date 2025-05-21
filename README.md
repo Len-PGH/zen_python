@@ -22,7 +22,7 @@ A modern customer portal for cable service management, featuring real-time modem
 
 Click the button below to import and run this project on Replit:
 
-[![Run on Replit](https://replit.com/badge?theme=dark&variant=small)](https://replit.com/@Len-PGH/zen_python)
+[![Run on Replit](https://replit.com/badge?theme=dark&variant=small)](https://replit.com/new/github/Len-PGH/zen_python)
 
 ## Installation
 
