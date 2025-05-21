@@ -10,7 +10,37 @@ from functools import wraps
 import requests
 import threading
 import time
-from signalwire.swaig import SWAIG, SWAIGArgument
+import logging
+from logging.handlers import RotatingFileHandler
+from signalwire_swaig.swaig import SWAIG, SWAIGArgument
+from signalwire.rest import Client as SignalWireClient
+import schedule
+import pytz
+from signalwire_swaig.swml import SWML
+
+# Configure logging
+def setup_logging():
+    # Create logs directory if it doesn't exist
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            RotatingFileHandler('logs/signalwire.log', maxBytes=10485760, backupCount=5),  # 10MB per file, keep 5 files
+            logging.StreamHandler()
+        ]
+    )
+    
+    # Create logger for SignalWire
+    logger = logging.getLogger('signalwire')
+    logger.setLevel(logging.INFO)
+    return logger
+
+# Initialize logger
+logger = setup_logging()
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -39,14 +69,10 @@ swaig = SWAIG(
     auth=(HTTP_USERNAME, HTTP_PASSWORD)
 )
 
+# Initialize SignalWire client
+signalwire_client = SignalWireClient(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, signalwire_space_url=SIGNALWIRE_SPACE)
+
 # Define SWAIG functions
-@swaig.function(
-    name="check_balance",
-    description="Check the current balance and due date for the customer's account",
-    arguments=[
-        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID")
-    ]
-)
 def check_balance(customer_id):
     db = get_db()
     customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
@@ -63,14 +89,6 @@ def check_balance(customer_id):
         return {"response": f"Your current balance is ${billing['amount']:.2f}, due on {billing['due_date']}."}
     return {"response": "I couldn't find any billing information for your account."}
 
-@swaig.function(
-    name="make_payment",
-    description="Make a payment on the customer's account",
-    arguments=[
-        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID"),
-        SWAIGArgument(name="amount", type="number", description="The amount to pay")
-    ]
-)
 def make_payment(customer_id, amount):
     db = get_db()
     customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
@@ -88,13 +106,6 @@ def make_payment(customer_id, amount):
     
     return {"response": f"I've initiated a payment of ${amount:.2f}. You'll receive a confirmation text shortly."}
 
-@swaig.function(
-    name="check_modem_status",
-    description="Check the current status of the customer's modem",
-    arguments=[
-        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID")
-    ]
-)
 def check_modem_status(customer_id):
     db = get_db()
     customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
@@ -108,13 +119,6 @@ def check_modem_status(customer_id):
         return {"response": f"Your modem is currently {modem['status']}. MAC address: {modem['mac_address']}."}
     return {"response": "I couldn't find any modem information for your account."}
 
-@swaig.function(
-    name="reboot_modem",
-    description="Reboot the customer's modem",
-    arguments=[
-        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID")
-    ]
-)
 def reboot_modem(customer_id):
     db = get_db()
     customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
@@ -134,15 +138,6 @@ def reboot_modem(customer_id):
     
     return {"response": "I've initiated a reboot of your modem. This will take about 30 seconds to complete."}
 
-@swaig.function(
-    name="schedule_appointment",
-    description="Schedule a service appointment",
-    arguments=[
-        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID"),
-        SWAIGArgument(name="type", type="string", description="Type of appointment (installation, repair, upgrade, modem_swap)"),
-        SWAIGArgument(name="date", type="string", description="Preferred date for the appointment (YYYY-MM-DD)")
-    ]
-)
 def schedule_appointment(customer_id, type, date):
     db = get_db()
     customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
@@ -178,14 +173,6 @@ def schedule_appointment(customer_id, type, date):
     
     return {"response": f"I've scheduled your {type} appointment for {date}. You'll receive a confirmation text shortly."}
 
-@swaig.function(
-    name="swap_modem",
-    description="Schedule a modem swap appointment",
-    arguments=[
-        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID"),
-        SWAIGArgument(name="date", type="string", description="Preferred date for the modem swap (YYYY-MM-DD)")
-    ]
-)
 def swap_modem(customer_id, date):
     db = get_db()
     customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
@@ -224,6 +211,56 @@ def swap_modem(customer_id, date):
     db.commit()
     
     return {"response": f"I've scheduled your modem swap for {date}. A technician will bring your new modem and help you with the installation."}
+
+# Register SWAIG functions
+swaig.functions = {
+    "check_balance": {
+        "description": "Check the current balance and due date for the customer's account",
+        "arguments": [
+            SWAIGArgument("customer_id", "string", "The customer's account ID")
+        ],
+        "function": check_balance
+    },
+    "make_payment": {
+        "description": "Make a payment on the customer's account",
+        "arguments": [
+            SWAIGArgument("customer_id", "string", "The customer's account ID"),
+            SWAIGArgument("amount", "number", "The amount to pay")
+        ],
+        "function": make_payment
+    },
+    "check_modem_status": {
+        "description": "Check the current status of the customer's modem",
+        "arguments": [
+            SWAIGArgument("customer_id", "string", "The customer's account ID")
+        ],
+        "function": check_modem_status
+    },
+    "reboot_modem": {
+        "description": "Reboot the customer's modem",
+        "arguments": [
+            SWAIGArgument("customer_id", "string", "The customer's account ID")
+        ],
+        "function": reboot_modem
+    },
+    "schedule_appointment": {
+        "description": "Schedule a service appointment",
+        "arguments": [
+            SWAIGArgument("customer_id", "string", "The customer's account ID"),
+            SWAIGArgument("type", "string", "Type of appointment (installation, repair, upgrade, modem_swap)"),
+            SWAIGArgument("date", "string", "Preferred date for the appointment (YYYY-MM-DD)")
+        ],
+        "function": schedule_appointment
+    },
+    "swap_modem": {
+        "description": "Schedule a modem swap appointment",
+        "arguments": [
+            SWAIGArgument("customer_id", "string", "The customer's account ID"),
+            SWAIGArgument("date", "string", "Preferred date for the modem swap (YYYY-MM-DD)")
+        ],
+        "function": swap_modem
+    }
+}
 
 def get_db():
     db = sqlite3.connect('zen_cable.db')
@@ -358,6 +395,462 @@ def dashboard():
                          billing=billing)
 
 # API Routes
+@app.route('/api/appointments', methods=['GET'])
+@login_required
+def get_appointments():
+    # Get query parameters
+    start = request.args.get('start')
+    end = request.args.get('end')
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+    status = request.args.get('status')
+    type = request.args.get('type')
+    technician = request.args.get('technician')
+    priority = request.args.get('priority')
+    sort_by = request.args.get('sort_by', 'start_time')
+    sort_order = request.args.get('sort_order', 'desc')
+    include_history = request.args.get('include_history', 'false').lower() == 'true'
+    include_reminders = request.args.get('include_reminders', 'false').lower() == 'true'
+    
+    # Validate pagination parameters
+    if page < 1:
+        return jsonify({'error': 'Page number must be greater than 0'}), 400
+    if per_page < 1 or per_page > 100:
+        return jsonify({'error': 'Items per page must be between 1 and 100'}), 400
+    
+    # Validate date parameters
+    if not start or not end:
+        return jsonify({'error': 'Start and end dates are required'}), 400
+    
+    try:
+        start_date = datetime.strptime(start, '%Y-%m-%d')
+        end_date = datetime.strptime(end, '%Y-%m-%d')
+        
+        # Validate date range
+        if start_date > end_date:
+            return jsonify({'error': 'Start date must be before end date'}), 400
+        
+        # Limit date range to 1 year
+        if (end_date - start_date).days > 365:
+            return jsonify({'error': 'Date range cannot exceed 1 year'}), 400
+            
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+    
+    # Validate status and type if provided
+    valid_statuses = ['scheduled', 'completed', 'cancelled', 'pending']
+    valid_types = ['installation', 'repair', 'upgrade', 'modem_swap']
+    valid_priorities = ['low', 'medium', 'high', 'urgent']
+    valid_sort_fields = ['start_time', 'end_time', 'type', 'status', 'priority']
+    valid_sort_orders = ['asc', 'desc']
+    
+    if status and status not in valid_statuses:
+        return jsonify({'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}), 400
+    if type and type not in valid_types:
+        return jsonify({'error': f'Invalid type. Must be one of: {", ".join(valid_types)}'}), 400
+    if priority and priority not in valid_priorities:
+        return jsonify({'error': f'Invalid priority. Must be one of: {", ".join(valid_priorities)}'}), 400
+    if sort_by not in valid_sort_fields:
+        return jsonify({'error': f'Invalid sort field. Must be one of: {", ".join(valid_sort_fields)}'}), 400
+    if sort_order not in valid_sort_orders:
+        return jsonify({'error': f'Invalid sort order. Must be one of: {", ".join(valid_sort_orders)}'}), 400
+    
+    db = get_db()
+    
+    # Build query
+    query = '''
+        SELECT a.*, 
+               c.name as customer_name,
+               c.phone as customer_phone,
+               t.name as technician_name
+        FROM appointments a
+        LEFT JOIN customers c ON a.customer_id = c.id
+        LEFT JOIN technicians t ON a.technician_id = t.id
+        WHERE a.customer_id = ? 
+        AND a.start_time BETWEEN ? AND ?
+    '''
+    params = [session['customer_id'], start, end]
+    
+    if status:
+        query += ' AND a.status = ?'
+        params.append(status)
+    if type:
+        query += ' AND a.type = ?'
+        params.append(type)
+    if technician:
+        query += ' AND t.name LIKE ?'
+        params.append(f'%{technician}%')
+    if priority:
+        query += ' AND a.priority = ?'
+        params.append(priority)
+    
+    # Add ordering
+    query += f' ORDER BY a.{sort_by} {sort_order}'
+    
+    # Get total count for pagination
+    count_query = f"SELECT COUNT(*) FROM ({query})"
+    total = db.execute(count_query, params).fetchone()[0]
+    
+    # Add pagination
+    query += ' LIMIT ? OFFSET ?'
+    params.extend([per_page, (page - 1) * per_page])
+    
+    appointments = db.execute(query, params).fetchall()
+    result = [dict(appt) for appt in appointments]
+    
+    # Include history if requested
+    if include_history:
+        for appt in result:
+            history = db.execute('''
+                SELECT * FROM appointment_history 
+                WHERE appointment_id = ? 
+                ORDER BY created_at DESC
+            ''', (appt['id'],)).fetchall()
+            appt['history'] = [dict(h) for h in history]
+    
+    # Include reminders if requested
+    if include_reminders:
+        for appt in result:
+            reminders = db.execute('''
+                SELECT * FROM appointment_reminders 
+                WHERE appointment_id = ? 
+                ORDER BY sent_at DESC
+            ''', (appt['id'],)).fetchall()
+            appt['reminders'] = [dict(r) for r in reminders]
+    
+    return jsonify({
+        'appointments': result,
+        'pagination': {
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': (total + per_page - 1) // per_page
+        }
+    })
+
+@app.route('/api/appointments', methods=['POST'])
+@login_required
+def create_appointment():
+    data = request.json
+    
+    # Validate required fields
+    required_fields = ['type', 'date']
+    for field in required_fields:
+        if field not in data:
+            return jsonify({'error': f'Missing required field: {field}'}), 400
+    
+    # Validate appointment type
+    valid_types = ['installation', 'repair', 'upgrade', 'modem_swap']
+    if data['type'] not in valid_types:
+        return jsonify({'error': f'Invalid type. Must be one of: {", ".join(valid_types)}'}), 400
+    
+    # Validate date
+    try:
+        appointment_date = datetime.strptime(data['date'], '%Y-%m-%d')
+        if appointment_date < datetime.now():
+            return jsonify({'error': 'Cannot schedule appointments in the past'}), 400
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+    
+    db = get_db()
+    
+    # Check for existing appointments on the same day
+    existing = db.execute('''
+        SELECT * FROM appointments 
+        WHERE customer_id = ? 
+        AND date(start_time) = date(?)
+    ''', (session['customer_id'], data['date'])).fetchone()
+    
+    if existing:
+        return jsonify({'error': f'You already have an appointment scheduled for {data["date"]}'}), 400
+    
+    # Create appointment
+    cursor = db.execute('''
+        INSERT INTO appointments (
+            customer_id, type, status, start_time, end_time, notes,
+            priority, technician_id, location
+        ) VALUES (?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)
+    ''', (
+        session['customer_id'],
+        data['type'],
+        appointment_date.strftime('%Y-%m-%d 09:00:00'),
+        appointment_date.strftime('%Y-%m-%d 11:00:00'),
+        data.get('notes', ''),
+        data.get('priority', 'medium'),
+        data.get('technician_id'),
+        data.get('location', '')
+    ))
+    db.commit()
+    
+    # Get the created appointment
+    appointment = db.execute('SELECT * FROM appointments WHERE id = ?', 
+                           (cursor.lastrowid,)).fetchone()
+    
+    # Log appointment creation
+    log_appointment_history(
+        appointment['id'],
+        'created',
+        {
+            'type': appointment['type'],
+            'date': appointment['start_time'],
+            'notes': appointment['notes'],
+            'priority': appointment['priority']
+        }
+    )
+    
+    # Schedule reminders
+    schedule_reminders(dict(appointment))
+    
+    return jsonify(dict(appointment)), 201
+
+@app.route('/api/appointments/<int:appointment_id>', methods=['PUT'])
+@login_required
+def update_appointment(appointment_id):
+    data = request.json
+    
+    db = get_db()
+    
+    # Check if appointment exists and belongs to user
+    appointment = db.execute('''
+        SELECT * FROM appointments 
+        WHERE id = ? AND customer_id = ?
+    ''', (appointment_id, session['customer_id'])).fetchone()
+    
+    if not appointment:
+        return jsonify({'error': 'Appointment not found'}), 404
+    
+    # Validate status if provided
+    if 'status' in data:
+        valid_statuses = ['scheduled', 'completed', 'cancelled', 'pending']
+        if data['status'] not in valid_statuses:
+            return jsonify({'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}), 400
+    
+    # Validate date if provided
+    if 'date' in data:
+        try:
+            new_date = datetime.strptime(data['date'], '%Y-%m-%d')
+            if new_date < datetime.now():
+                return jsonify({'error': 'Cannot schedule appointments in the past'}), 400
+        except ValueError:
+            return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+        
+        # Check for conflicts with other appointments
+        existing = db.execute('''
+            SELECT * FROM appointments 
+            WHERE customer_id = ? 
+            AND date(start_time) = date(?)
+            AND id != ?
+        ''', (session['customer_id'], data['date'], appointment_id)).fetchone()
+        
+        if existing:
+            return jsonify({'error': f'You already have another appointment scheduled for {data["date"]}'}), 400
+    
+    # Update appointment
+    update_fields = []
+    params = []
+    
+    if 'status' in data:
+        update_fields.append('status = ?')
+        params.append(data['status'])
+    
+    if 'date' in data:
+        update_fields.append('start_time = ?')
+        update_fields.append('end_time = ?')
+        params.extend([
+            new_date.strftime('%Y-%m-%d 09:00:00'),
+            new_date.strftime('%Y-%m-%d 11:00:00')
+        ])
+    
+    if 'notes' in data:
+        update_fields.append('notes = ?')
+        params.append(data['notes'])
+    
+    if 'priority' in data:
+        valid_priorities = ['low', 'medium', 'high', 'urgent']
+        if data['priority'] not in valid_priorities:
+            return jsonify({'error': f'Invalid priority. Must be one of: {", ".join(valid_priorities)}'}), 400
+        update_fields.append('priority = ?')
+        params.append(data['priority'])
+    
+    if 'technician_id' in data:
+        update_fields.append('technician_id = ?')
+        params.append(data['technician_id'])
+    
+    if 'location' in data:
+        update_fields.append('location = ?')
+        params.append(data['location'])
+    
+    if update_fields:
+        query = f'''
+            UPDATE appointments 
+            SET {', '.join(update_fields)}
+            WHERE id = ? AND customer_id = ?
+        '''
+        params.extend([appointment_id, session['customer_id']])
+        
+        db.execute(query, params)
+        db.commit()
+        
+        # Log appointment update
+        log_appointment_history(
+            appointment_id,
+            'updated',
+            {k: v for k, v in data.items() if k in ['status', 'date', 'notes', 'priority', 'technician_id', 'location']}
+        )
+        
+        # Reschedule reminders if date changed
+        if 'date' in data:
+            updated = db.execute('SELECT * FROM appointments WHERE id = ?', 
+                               (appointment_id,)).fetchone()
+            schedule_reminders(dict(updated))
+    
+    # Get updated appointment
+    updated = db.execute('SELECT * FROM appointments WHERE id = ?', 
+                        (appointment_id,)).fetchone()
+    
+    return jsonify(dict(updated))
+
+@app.route('/api/appointments/<int:appointment_id>', methods=['DELETE'])
+@login_required
+def delete_appointment(appointment_id):
+    db = get_db()
+    
+    # Check if appointment exists and belongs to user
+    appointment = db.execute('''
+        SELECT * FROM appointments 
+        WHERE id = ? AND customer_id = ?
+    ''', (appointment_id, session['customer_id'])).fetchone()
+    
+    if not appointment:
+        return jsonify({'error': 'Appointment not found'}), 404
+    
+    # Check if appointment is in the future
+    if datetime.strptime(appointment['start_time'], '%Y-%m-%d %H:%M:%S') < datetime.now():
+        return jsonify({'error': 'Cannot delete past appointments'}), 400
+    
+    # Log appointment deletion
+    log_appointment_history(
+        appointment_id,
+        'deleted',
+        {
+            'type': appointment['type'],
+            'date': appointment['start_time'],
+            'reason': request.json.get('reason', 'No reason provided')
+        }
+    )
+    
+    # Delete appointment
+    db.execute('DELETE FROM appointments WHERE id = ?', (appointment_id,))
+    db.commit()
+    
+    return '', 204
+
+@app.route('/api/appointments/<int:appointment_id>/history', methods=['GET'])
+@login_required
+def get_appointment_history(appointment_id):
+    db = get_db()
+    
+    # Check if appointment exists and belongs to user
+    appointment = db.execute('''
+        SELECT * FROM appointments 
+        WHERE id = ? AND customer_id = ?
+    ''', (appointment_id, session['customer_id'])).fetchone()
+    
+    if not appointment:
+        return jsonify({'error': 'Appointment not found'}), 404
+    
+    # Get appointment history
+    history = db.execute('''
+        SELECT * FROM appointment_history 
+        WHERE appointment_id = ? 
+        ORDER BY created_at DESC
+    ''', (appointment_id,)).fetchall()
+    
+    return jsonify([dict(h) for h in history])
+
+@app.route('/api/appointments/<int:appointment_id>/reminders', methods=['GET'])
+@login_required
+def get_appointment_reminders(appointment_id):
+    db = get_db()
+    
+    # Check if appointment exists and belongs to user
+    appointment = db.execute('''
+        SELECT * FROM appointments 
+        WHERE id = ? AND customer_id = ?
+    ''', (appointment_id, session['customer_id'])).fetchone()
+    
+    if not appointment:
+        return jsonify({'error': 'Appointment not found'}), 404
+    
+    # Get appointment reminders
+    reminders = db.execute('''
+        SELECT * FROM appointment_reminders 
+        WHERE appointment_id = ? 
+        ORDER BY sent_at DESC
+    ''', (appointment_id,)).fetchall()
+    
+    return jsonify([dict(r) for r in reminders])
+
+@app.route('/api/appointments/<int:appointment_id>/reminders', methods=['POST'])
+@login_required
+def send_appointment_reminder_now(appointment_id):
+    db = get_db()
+    
+    # Check if appointment exists and belongs to user
+    appointment = db.execute('''
+        SELECT * FROM appointments 
+        WHERE id = ? AND customer_id = ?
+    ''', (appointment_id, session['customer_id'])).fetchone()
+    
+    if not appointment:
+        return jsonify({'error': 'Appointment not found'}), 404
+    
+    reminder_type = request.json.get('type', 'sms')
+    if reminder_type not in ['sms', 'call']:
+        return jsonify({'error': 'Invalid reminder type. Must be either "sms" or "call"'}), 400
+    
+    success = send_appointment_reminder(dict(appointment), reminder_type)
+    
+    if success:
+        return jsonify({'message': f'{reminder_type.upper()} reminder sent successfully'})
+    else:
+        return jsonify({'error': 'Failed to send reminder'}), 500
+
+@app.route('/reminder_call/<int:appointment_id>', methods=['POST'])
+def reminder_call(appointment_id):
+    """Handle incoming call for appointment reminder"""
+    logger.info(f"Received reminder call request for appointment {appointment_id}")
+    
+    db = get_db()
+    appointment = db.execute('SELECT * FROM appointments WHERE id = ?', 
+                           (appointment_id,)).fetchone()
+    
+    if not appointment:
+        logger.error(f"Appointment {appointment_id} not found for reminder call")
+        return jsonify({'error': 'Appointment not found'}), 404
+    
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', 
+                         (appointment['customer_id'],)).fetchone()
+    
+    if not customer:
+        logger.error(f"Customer not found for appointment {appointment_id}")
+        return jsonify({'error': 'Customer not found'}), 404
+    
+    appointment_time = datetime.strptime(appointment['start_time'], '%Y-%m-%d %H:%M:%S')
+    formatted_time = appointment_time.strftime('%B %d, %Y at %I:%M %p')
+    
+    # Create SWML response
+    response = SWML()
+    response.say(f"""
+        Hello, this is a reminder that you have a {appointment['type']} appointment 
+        scheduled for {formatted_time}. 
+        Please call us at 1-800-ZEN-CABLE if you need to reschedule.
+        Thank you for choosing Zen Cable.
+    """)
+    
+    logger.info(f"Generated SWML response for appointment {appointment_id}")
+    return str(response)
+
 @app.route('/api/modem/status', methods=['GET', 'POST'])
 @login_required
 def modem_status():
@@ -421,6 +914,8 @@ def swaig():
 
 def simulate_modem_reboot(customer_id):
     """Simulate a modem reboot sequence"""
+    logger.info(f"Starting modem reboot simulation for customer {customer_id}")
+    
     db = get_db()
     
     # Set status to rebooting
@@ -430,6 +925,7 @@ def simulate_modem_reboot(customer_id):
         WHERE customer_id = ?
     ''', (customer_id,))
     db.commit()
+    logger.info(f"Set modem status to rebooting for customer {customer_id}")
     
     # Wait for 30 seconds to simulate reboot
     time.sleep(30)
@@ -441,7 +937,84 @@ def simulate_modem_reboot(customer_id):
         WHERE customer_id = ?
     ''', (customer_id,))
     db.commit()
+    logger.info(f"Completed modem reboot simulation for customer {customer_id}")
     db.close()
+
+def send_appointment_reminder(appointment, reminder_type='sms'):
+    """Send appointment reminder via SMS or call"""
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', 
+                         (appointment['customer_id'],)).fetchone()
+    
+    if not customer:
+        logger.error(f"Failed to send reminder: Customer not found for appointment {appointment['id']}")
+        return False
+    
+    appointment_time = datetime.strptime(appointment['start_time'], '%Y-%m-%d %H:%M:%S')
+    formatted_time = appointment_time.strftime('%B %d, %Y at %I:%M %p')
+    
+    message = f"""
+    Reminder: You have a {appointment['type']} appointment scheduled for {formatted_time}.
+    Please call us at 1-800-ZEN-CABLE if you need to reschedule.
+    """
+    
+    try:
+        if reminder_type == 'sms':
+            logger.info(f"Sending SMS reminder for appointment {appointment['id']} to {customer['phone'][-4:]}")
+            message_response = signalwire_client.messages.create(
+                to=customer['phone'],
+                from_='+1800ZENCABLE',
+                body=message
+            )
+            logger.info(f"SMS sent successfully. Message SID: {message_response.sid}")
+        else:  # call
+            logger.info(f"Initiating reminder call for appointment {appointment['id']} to {customer['phone'][-4:]}")
+            call_response = signalwire_client.calls.create(
+                to=customer['phone'],
+                from_='+1800ZENCABLE',
+                url=f"{request.host_url}reminder_call/{appointment['id']}"
+            )
+            logger.info(f"Call initiated successfully. Call SID: {call_response.sid}")
+        
+        # Log reminder in database
+        db.execute('''
+            INSERT INTO appointment_reminders (
+                appointment_id, reminder_type, sent_at, status
+            ) VALUES (?, ?, CURRENT_TIMESTAMP, 'sent')
+        ''', (appointment['id'], reminder_type))
+        db.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error sending {reminder_type} reminder for appointment {appointment['id']}: {str(e)}")
+        return False
+
+def schedule_reminders(appointment):
+    """Schedule reminders for an appointment"""
+    appointment_time = datetime.strptime(appointment['start_time'], '%Y-%m-%d %H:%M:%S')
+    
+    # Schedule SMS reminder 24 hours before
+    sms_time = appointment_time - timedelta(hours=24)
+    if sms_time > datetime.now():
+        schedule.every().day.at(sms_time.strftime('%H:%M')).do(
+            send_appointment_reminder, appointment, 'sms'
+        )
+    
+    # Schedule call reminder 1 hour before
+    call_time = appointment_time - timedelta(hours=1)
+    if call_time > datetime.now():
+        schedule.every().day.at(call_time.strftime('%H:%M')).do(
+            send_appointment_reminder, appointment, 'call'
+        )
+
+def log_appointment_history(appointment_id, action, details):
+    """Log appointment history changes"""
+    db = get_db()
+    db.execute('''
+        INSERT INTO appointment_history (
+            appointment_id, action, details, created_at
+        ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ''', (appointment_id, action, json.dumps(details)))
+    db.commit()
 
 if __name__ == '__main__':
     print("\n" + "="*50)
