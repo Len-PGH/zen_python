@@ -1,19 +1,1 @@
 run = "python3 init_db.py && python3 init_test_data.py && python3 app.py"
-hidden = [".config", "package.json", "package-lock.json"]
-ignore = [".venv", "venv", "__pycache__", "*.pyc"]
-
-[nix]
-channel = "stable-22_11"
-
-[env]
-PYTHONPATH = "${PYTHONPATH}:${REPL_HOME}"
-FLASK_ENV = "development"
-
-[packager]
-language = "python3"
-ignoredPackages = ["unit_tests"]
-
-[packager.features]
-enabledForHosting = false
-packageSearch = true
-guessImports = true 
