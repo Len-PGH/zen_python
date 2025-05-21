@@ -16,7 +16,7 @@ from signalwire_swaig.swaig import SWAIG, SWAIGArgument
 from signalwire.rest import Client as SignalWireClient
 import schedule
 import pytz
-from signalwire_swaig.swml import SWML
+from signalwire.voice_response import VoiceResponse
 
 # Configure logging
 def setup_logging():
@@ -839,8 +839,8 @@ def reminder_call(appointment_id):
     appointment_time = datetime.strptime(appointment['start_time'], '%Y-%m-%d %H:%M:%S')
     formatted_time = appointment_time.strftime('%B %d, %Y at %I:%M %p')
     
-    # Create SWML response
-    response = SWML()
+    # Create VoiceResponse instead of SWML
+    response = VoiceResponse()
     response.say(f"""
         Hello, this is a reminder that you have a {appointment['type']} appointment 
         scheduled for {formatted_time}. 
@@ -848,7 +848,7 @@ def reminder_call(appointment_id):
         Thank you for choosing Zen Cable.
     """)
     
-    logger.info(f"Generated SWML response for appointment {appointment_id}")
+    logger.info(f"Generated VoiceResponse for appointment {appointment_id}")
     return str(response)
 
 @app.route('/api/modem/status', methods=['GET', 'POST'])
