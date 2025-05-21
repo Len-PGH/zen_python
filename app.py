@@ -10,6 +10,7 @@ from functools import wraps
 import requests
 import threading
 import time
+from signalwire.swaig import SWAIG, SWAIGArgument
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -19,16 +20,210 @@ load_dotenv()
 SIGNALWIRE_PROJECT_ID = os.getenv('SIGNALWIRE_PROJECT_ID')
 SIGNALWIRE_TOKEN = os.getenv('SIGNALWIRE_TOKEN')
 SIGNALWIRE_SPACE = os.getenv('SIGNALWIRE_SPACE')
+HTTP_USERNAME = os.getenv('HTTP_USERNAME')
+HTTP_PASSWORD = os.getenv('HTTP_PASSWORD')
 
 # Environment Configuration
 HOST = os.getenv('HOST', '127.0.0.1')
-PORT = int(os.getenv('PORT', 5000))
+PORT = int(os.getenv('PORT', 8080))
 DEBUG = os.getenv('FLASK_ENV') == 'development'
 
 # Replit Configuration
 if os.getenv('REPL_ID'):  # Check if running on Replit
     HOST = '0.0.0.0'
-    PORT = 8080  # Replit's default port
+    # Port is already 8080 by default now
+
+# Initialize SWAIG
+swaig = SWAIG(
+    app,
+    auth=(HTTP_USERNAME, HTTP_PASSWORD)
+)
+
+# Define SWAIG functions
+@swaig.function(
+    name="check_balance",
+    description="Check the current balance and due date for the customer's account",
+    arguments=[
+        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID")
+    ]
+)
+def check_balance(customer_id):
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+    if not customer:
+        return {"response": "I couldn't find your account. Please verify your account number."}
+    
+    billing = db.execute('''
+        SELECT * FROM billing 
+        WHERE customer_id = ? 
+        ORDER BY due_date DESC LIMIT 1
+    ''', (customer_id,)).fetchone()
+    
+    if billing:
+        return {"response": f"Your current balance is ${billing['amount']:.2f}, due on {billing['due_date']}."}
+    return {"response": "I couldn't find any billing information for your account."}
+
+@swaig.function(
+    name="make_payment",
+    description="Make a payment on the customer's account",
+    arguments=[
+        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID"),
+        SWAIGArgument(name="amount", type="number", description="The amount to pay")
+    ]
+)
+def make_payment(customer_id, amount):
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+    if not customer:
+        return {"response": "I couldn't find your account. Please verify your account number."}
+    
+    if not amount or amount <= 0:
+        return {"response": "Please provide a valid payment amount."}
+    
+    db.execute('''
+        INSERT INTO payments (customer_id, amount, payment_date, payment_method, status, transaction_id)
+        VALUES (?, ?, CURRENT_TIMESTAMP, 'phone', 'pending', ?)
+    ''', (customer_id, amount, secrets.token_hex(16)))
+    db.commit()
+    
+    return {"response": f"I've initiated a payment of ${amount:.2f}. You'll receive a confirmation text shortly."}
+
+@swaig.function(
+    name="check_modem_status",
+    description="Check the current status of the customer's modem",
+    arguments=[
+        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID")
+    ]
+)
+def check_modem_status(customer_id):
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+    if not customer:
+        return {"response": "I couldn't find your account. Please verify your account number."}
+    
+    modem = db.execute('SELECT * FROM modems WHERE customer_id = ?',
+                      (customer_id,)).fetchone()
+    
+    if modem:
+        return {"response": f"Your modem is currently {modem['status']}. MAC address: {modem['mac_address']}."}
+    return {"response": "I couldn't find any modem information for your account."}
+
+@swaig.function(
+    name="reboot_modem",
+    description="Reboot the customer's modem",
+    arguments=[
+        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID")
+    ]
+)
+def reboot_modem(customer_id):
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+    if not customer:
+        return {"response": "I couldn't find your account. Please verify your account number."}
+    
+    modem = db.execute('SELECT * FROM modems WHERE customer_id = ?',
+                      (customer_id,)).fetchone()
+    
+    if not modem:
+        return {"response": "I couldn't find any modem information for your account."}
+    
+    # Start reboot simulation in a separate thread
+    thread = threading.Thread(target=simulate_modem_reboot, args=(customer_id,))
+    thread.daemon = True
+    thread.start()
+    
+    return {"response": "I've initiated a reboot of your modem. This will take about 30 seconds to complete."}
+
+@swaig.function(
+    name="schedule_appointment",
+    description="Schedule a service appointment",
+    arguments=[
+        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID"),
+        SWAIGArgument(name="type", type="string", description="Type of appointment (installation, repair, upgrade, modem_swap)"),
+        SWAIGArgument(name="date", type="string", description="Preferred date for the appointment (YYYY-MM-DD)")
+    ]
+)
+def schedule_appointment(customer_id, type, date):
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+    if not customer:
+        return {"response": "I couldn't find your account. Please verify your account number."}
+    
+    if type not in ['installation', 'repair', 'upgrade', 'modem_swap']:
+        return {"response": "Invalid appointment type. Please choose from: installation, repair, upgrade, or modem_swap."}
+    
+    try:
+        appointment_date = datetime.strptime(date, '%Y-%m-%d')
+        if appointment_date < datetime.now():
+            return {"response": "Please select a future date for the appointment."}
+    except ValueError:
+        return {"response": "Invalid date format. Please use YYYY-MM-DD."}
+    
+    # Check for existing appointments on the same day
+    existing = db.execute('''
+        SELECT * FROM appointments 
+        WHERE customer_id = ? 
+        AND date(start_time) = date(?)
+    ''', (customer_id, appointment_date)).fetchone()
+    
+    if existing:
+        return {"response": f"You already have an appointment scheduled for {date}. Please choose a different date."}
+    
+    db.execute('''
+        INSERT INTO appointments (customer_id, type, status, start_time, end_time)
+        VALUES (?, ?, 'scheduled', ?, ?)
+    ''', (customer_id, type, appointment_date.strftime('%Y-%m-%d 09:00:00'),
+          appointment_date.strftime('%Y-%m-%d 11:00:00')))
+    db.commit()
+    
+    return {"response": f"I've scheduled your {type} appointment for {date}. You'll receive a confirmation text shortly."}
+
+@swaig.function(
+    name="swap_modem",
+    description="Schedule a modem swap appointment",
+    arguments=[
+        SWAIGArgument(name="customer_id", type="string", description="The customer's account ID"),
+        SWAIGArgument(name="date", type="string", description="Preferred date for the modem swap (YYYY-MM-DD)")
+    ]
+)
+def swap_modem(customer_id, date):
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+    if not customer:
+        return {"response": "I couldn't find your account. Please verify your account number."}
+    
+    current_modem = db.execute('SELECT * FROM modems WHERE customer_id = ?',
+                             (customer_id,)).fetchone()
+    
+    if not current_modem:
+        return {"response": "I couldn't find any modem information for your account."}
+    
+    try:
+        appointment_date = datetime.strptime(date, '%Y-%m-%d')
+        if appointment_date < datetime.now():
+            return {"response": "Please select a future date for the modem swap."}
+    except ValueError:
+        return {"response": "Invalid date format. Please use YYYY-MM-DD."}
+    
+    # Check for existing appointments on the same day
+    existing = db.execute('''
+        SELECT * FROM appointments 
+        WHERE customer_id = ? 
+        AND date(start_time) = date(?)
+    ''', (customer_id, appointment_date)).fetchone()
+    
+    if existing:
+        return {"response": f"You already have an appointment scheduled for {date}. Please choose a different date."}
+    
+    db.execute('''
+        INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes)
+        VALUES (?, 'modem_swap', 'scheduled', ?, ?, ?)
+    ''', (customer_id, appointment_date.strftime('%Y-%m-%d 10:00:00'),
+          appointment_date.strftime('%Y-%m-%d 12:00:00'),
+          f"Current MAC: {current_modem['mac_address']}"))
+    db.commit()
+    
+    return {"response": f"I've scheduled your modem swap for {date}. A technician will bring your new modem and help you with the installation."}
 
 def get_db():
     db = sqlite3.connect('zen_cable.db')
@@ -210,119 +405,18 @@ def swaig():
         })
     
     if intent.get('name') == 'check_balance':
-        return check_balance(customer)
+        return check_balance(customer_id)
     elif intent.get('name') == 'make_payment':
-        return make_payment_swaig(customer, data)
+        return make_payment(customer_id, data.get('amount'))
     elif intent.get('name') == 'check_modem_status':
-        return check_modem_status(customer)
+        return check_modem_status(customer_id)
     elif intent.get('name') == 'schedule_appointment':
-        return schedule_appointment_swaig(customer, data)
+        return schedule_appointment(customer_id, intent.get('type'), intent.get('date'))
     elif intent.get('name') == 'swap_modem':
-        return swap_modem(customer, data)
+        return swap_modem(customer_id, intent.get('date'))
     
     return jsonify({
         'response': "I'm sorry, I didn't understand that request. You can ask me about your balance, make a payment, check your modem status, schedule an appointment, or swap your modem."
-    })
-
-def check_balance(customer):
-    db = get_db()
-    billing = db.execute('''
-        SELECT * FROM billing 
-        WHERE customer_id = ? 
-        ORDER BY due_date DESC LIMIT 1
-    ''', (customer['id'],)).fetchone()
-    
-    if billing:
-        return jsonify({
-            'response': f"Your current balance is ${billing['amount']:.2f}, due on {billing['due_date']}."
-        })
-    return jsonify({
-        'response': "I couldn't find any billing information for your account."
-    })
-
-def make_payment_swaig(customer, data):
-    amount = data.get('amount')
-    if not amount:
-        return jsonify({
-            'response': "How much would you like to pay?"
-        })
-    
-    db = get_db()
-    db.execute('''
-        INSERT INTO payments (customer_id, amount, payment_date, payment_method, status, transaction_id)
-        VALUES (?, ?, CURRENT_TIMESTAMP, 'phone', 'pending', ?)
-    ''', (customer['id'], amount, secrets.token_hex(16)))
-    db.commit()
-    
-    return jsonify({
-        'response': f"I've initiated a payment of ${amount:.2f}. You'll receive a confirmation text shortly."
-    })
-
-def check_modem_status(customer):
-    db = get_db()
-    modem = db.execute('SELECT * FROM modems WHERE customer_id = ?',
-                      (customer['id'],)).fetchone()
-    
-    if modem:
-        return jsonify({
-            'response': f"Your modem is currently {modem['status']}. MAC address: {modem['mac_address']}."
-        })
-    return jsonify({
-        'response': "I couldn't find any modem information for your account."
-    })
-
-def schedule_appointment_swaig(customer, data):
-    appointment_type = data.get('type')
-    if not appointment_type:
-        return jsonify({
-            'response': "What type of appointment would you like to schedule? You can choose from installation, repair, upgrade, or modem swap."
-        })
-    
-    preferred_date = data.get('date')
-    if not preferred_date:
-        return jsonify({
-            'response': "What date would you prefer for the appointment?"
-        })
-    
-    db = get_db()
-    db.execute('''
-        INSERT INTO appointments (customer_id, type, status, start_time, end_time)
-        VALUES (?, ?, 'scheduled', ?, ?)
-    ''', (customer['id'], appointment_type, preferred_date, 
-          datetime.strptime(preferred_date, '%Y-%m-%d') + timedelta(hours=1)))
-    db.commit()
-    
-    return jsonify({
-        'response': f"I've scheduled your {appointment_type} appointment for {preferred_date}. You'll receive a confirmation text shortly."
-    })
-
-def swap_modem(customer, data):
-    db = get_db()
-    current_modem = db.execute('SELECT * FROM modems WHERE customer_id = ?',
-                             (customer['id'],)).fetchone()
-    
-    if not current_modem:
-        return jsonify({
-            'response': "I couldn't find any modem information for your account."
-        })
-    
-    # Schedule modem swap appointment
-    preferred_date = data.get('date')
-    if not preferred_date:
-        return jsonify({
-            'response': "What date would you prefer for the modem swap?"
-        })
-    
-    db.execute('''
-        INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes)
-        VALUES (?, 'modem_swap', 'scheduled', ?, ?, ?)
-    ''', (customer['id'], preferred_date, 
-          datetime.strptime(preferred_date, '%Y-%m-%d') + timedelta(hours=1),
-          f"Current MAC: {current_modem['mac_address']}"))
-    db.commit()
-    
-    return jsonify({
-        'response': f"I've scheduled your modem swap for {preferred_date}. A technician will bring your new modem and help you with the installation."
     })
 
 def simulate_modem_reboot(customer_id):
