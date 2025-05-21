@@ -18,6 +18,12 @@ A modern customer portal for cable service management, featuring real-time modem
 - ngrok (for local development with SignalWire)
 - SignalWire account (for voice integration)
 
+## Run on Replit
+
+Click the button below to import and run this project on Replit:
+
+[![Run on Replit](https://replit.com/badge?theme=dark&variant=small)](https://replit.com/@Len-PGH/zen_python)
+
 ## Installation
 
 1. Clone the repository:
