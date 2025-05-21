@@ -2,11 +2,17 @@ import sqlite3
 import hashlib
 import secrets
 
+def hash_password(password: str):
+    """Generate a salt and SHA-256 hash for the given password."""
+    salt = secrets.token_hex(16)
+    pw_hash = hashlib.sha256((password + salt).encode()).hexdigest()
+    return pw_hash, salt
+
 def init_db():
     db = sqlite3.connect('zen_cable.db')
     db.row_factory = sqlite3.Row
-    
-    # Create customers table
+
+    # --- table creation ---
     db.execute('''
         CREATE TABLE IF NOT EXISTS customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,8 +25,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # Create services table
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS services (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,8 +36,7 @@ def init_db():
             status TEXT DEFAULT 'active'
         )
     ''')
-    
-    # Create customer_services table
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS customer_services (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,8 +49,7 @@ def init_db():
             FOREIGN KEY (service_id) REFERENCES services (id)
         )
     ''')
-    
-    # Create modems table
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS modems (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,8 +61,7 @@ def init_db():
             FOREIGN KEY (customer_id) REFERENCES customers (id)
         )
     ''')
-    
-    # Create billing table
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS billing (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,8 +73,7 @@ def init_db():
             FOREIGN KEY (customer_id) REFERENCES customers (id)
         )
     ''')
-    
-    # Create payments table
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS payments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,8 +86,7 @@ def init_db():
             FOREIGN KEY (customer_id) REFERENCES customers (id)
         )
     ''')
-    
-    # Create technicians table
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS technicians (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,8 +97,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # Create appointments table with enhanced fields
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,8 +116,7 @@ def init_db():
             FOREIGN KEY (technician_id) REFERENCES technicians (id)
         )
     ''')
-    
-    # Create appointment_history table
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS appointment_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,8 +127,7 @@ def init_db():
             FOREIGN KEY (appointment_id) REFERENCES appointments (id)
         )
     ''')
-    
-    # Create appointment_reminders table
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS appointment_reminders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,8 +139,7 @@ def init_db():
             FOREIGN KEY (appointment_id) REFERENCES appointments (id)
         )
     ''')
-    
-    # Create password_resets table
+
     db.execute('''
         CREATE TABLE IF NOT EXISTS password_resets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,11 +150,26 @@ def init_db():
             FOREIGN KEY (customer_id) REFERENCES customers (id)
         )
     ''')
-    
+
+    # --- seed test user ---
+    pw_hash, pw_salt = hash_password("password123")
+    db.execute('''
+        INSERT OR IGNORE INTO customers
+          (name, email, phone, address, password_hash, password_salt)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (
+        "Test User",
+        "test@example.com",
+        "000-000-0000",
+        "123 Test Lane",
+        pw_hash,
+        pw_salt
+    ))
+
     db.commit()
     db.close()
 
-    # Print test credentials
+    # Print credentials for your reference
     print("\n=== Test Account Credentials ===")
     print("Email: test@example.com")
     print("Password: password123")
@@ -166,4 +177,4 @@ def init_db():
 
 if __name__ == '__main__':
     init_db()
-    print("Database initialized successfully!") 
+    print("Database initialized successfully!")
