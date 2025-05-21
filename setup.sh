@@ -1,35 +1,46 @@
 #!/bin/bash
 
-# Exit immediately if a command exits with a non-zero status.
-set -e
+# Get the directory where the script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# Define the virtual environment directory name
-VENV_DIR="venv"
-
-# Check if the virtual environment exists
-if [ ! -d "$VENV_DIR" ]; then
+# Create virtual environment if it doesn't exist
+if [ ! -d "$SCRIPT_DIR/venv" ]; then
     echo "Creating virtual environment..."
-    python -m venv "$VENV_DIR"
+    python -m venv "$SCRIPT_DIR/venv"
 fi
 
-# Activate the virtual environment
+# Activate virtual environment
 echo "Activating virtual environment..."
-source "$VENV_DIR/bin/activate"
+source "$SCRIPT_DIR/venv/bin/activate"
 
 # Install dependencies
-if [ -f "requirements.txt" ]; then
-    echo "Installing dependencies from requirements.txt..."
-    pip install -r requirements.txt
-else
-    echo "requirements.txt not found. Skipping dependency installation."
+echo "Installing dependencies..."
+pip install -r "$SCRIPT_DIR/requirements.txt"
+
+# Create .env file if it doesn't exist
+if [ ! -f "$SCRIPT_DIR/.env" ]; then
+    echo "Creating .env file..."
+    cat > "$SCRIPT_DIR/.env" << EOL
+SIGNALWIRE_PROJECT_ID=your_project_id
+SIGNALWIRE_TOKEN=your_token
+SIGNALWIRE_SPACE=your_space
+HTTP_USERNAME=admin
+HTTP_PASSWORD=admin123
+HOST=127.0.0.1
+PORT=8080
+FLASK_ENV=development
+EOL
+    echo "Please update the .env file with your SignalWire credentials"
 fi
 
-# Navigate to the application directory (if necessary - assuming script is at project root)
-# cd server/Python_Examples/zen_python
+# Initialize database
+echo "Initializing database..."
+cd "$SCRIPT_DIR"
+python -c "
+from app import init_db_if_needed
+init_db_if_needed()
+"
 
-# Run the main application script
-echo "Starting the application..."
-python server/Python_Examples/zen_python/app.py
-
-# Deactivate the virtual environment when the script finishes (optional, depends on how you run it)
-# deactivate 
+echo "Setup complete! You can now run the application with:"
+echo "source $SCRIPT_DIR/venv/bin/activate"
+echo "python $SCRIPT_DIR/app.py" 
