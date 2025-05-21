@@ -52,7 +52,6 @@ swaig = None
 # Function to initialize SignalWire client and SWAIG
 def initialize_signalwire():
     global signalwire_client, swaig, SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, SIGNALWIRE_SPACE, HTTP_USERNAME, HTTP_PASSWORD
-    # Load environment variables if .env exists
     if os.path.exists('.env'):
         load_dotenv()
         SIGNALWIRE_PROJECT_ID = os.getenv('SIGNALWIRE_PROJECT_ID')
@@ -60,13 +59,13 @@ def initialize_signalwire():
         SIGNALWIRE_SPACE = os.getenv('SIGNALWIRE_SPACE')
         HTTP_USERNAME = os.getenv('HTTP_USERNAME')
         HTTP_PASSWORD = os.getenv('HTTP_PASSWORD')
-        # Validate environment variables
         if all([SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, SIGNALWIRE_SPACE, HTTP_USERNAME, HTTP_PASSWORD]):
             try:
                 signalwire_client = SignalWireClient(
                     SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, signalwire_space_url=SIGNALWIRE_SPACE
                 )
                 swaig = SWAIG(app, auth=(HTTP_USERNAME, HTTP_PASSWORD))
+                register_swaig_endpoints()  # Register endpoints after SWAIG initialization
                 logger.info("SignalWire client and SWAIG initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize SignalWire client or SWAIG: {str(e)}")
@@ -76,6 +75,153 @@ def initialize_signalwire():
             logger.warning("Missing environment variables; SignalWire client and SWAIG not initialized")
     else:
         logger.info("No .env file found; SignalWire client and SWAIG not initialized")
+
+# Function to register SWAIG endpoints
+def register_swaig_endpoints():
+    global swaig
+    if not swaig:
+        logger.error("Cannot register SWAIG endpoints: SWAIG not initialized")
+        return
+
+    # SWAIG endpoint: Check Balance
+    @swaig.endpoint(
+        "Check the current balance and due date for the customer's account",
+        customer_id=SWAIGArgument("string", "The customer's account ID", required=True)
+    )
+    def check_balance(customer_id, **kwargs):
+        db = get_db()
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+        if not customer:
+            return {"response": "I couldn't find your account. Please verify your account number."}
+        billing = db.execute('''
+            SELECT * FROM billing 
+            WHERE customer_id = ? 
+            ORDER BY due_date DESC LIMIT 1
+        ''', (customer_id,)).fetchone()
+        if billing:
+            return {"response": f"Your current balance is ${billing['amount']:.2f}, due on {billing['due_date']}."}
+        return {"response": "I couldn't find any billing information for your account."}
+
+    # SWAIG endpoint: Make Payment
+    @swaig.endpoint(
+        "Make a payment on the customer's account",
+        customer_id=SWAIGArgument("string", "The customer's account ID", required=True),
+        amount=SWAIGArgument("number", "The amount to pay", required=True)
+    )
+    def make_payment(customer_id, amount, **kwargs):
+        db = get_db()
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+        if not customer:
+            return {"response": "I couldn't find your account. Please verify your account number."}
+        if not amount or amount <= 0:
+            return {"response": "Please provide a valid payment amount."}
+        db.execute('''
+            INSERT INTO payments (customer_id, amount, payment_date, payment_method, status, transaction_id)
+            VALUES (?, ?, CURRENT_TIMESTAMP, 'phone', 'pending', ?)
+        ''', (customer_id, amount, secrets.token_hex(16)))
+        db.commit()
+        return {"response": f"I've initiated a payment of ${amount:.2f}. You'll receive a confirmation text shortly."}
+
+    # SWAIG endpoint: Check Modem Status
+    @swaig.endpoint(
+        "Check the current status of the customer's modem",
+        customer_id=SWAIGArgument("string", "The customer's account ID", required=True)
+    )
+    def check_modem_status(customer_id, **kwargs):
+        db = get_db()
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+        if not customer:
+            return {"response": "I couldn't find your account. Please verify your account number."}
+        modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
+        if modem:
+            return {"response": f"Your modem is currently {modem['status']}. MAC address: {modem['mac_address']}."}
+        return {"response": "I couldn't find any modem information for your account."}
+
+    # SWAIG endpoint: Reboot Modem
+    @swaig.endpoint(
+        "Reboot the customer's modem",
+        customer_id=SWAIGArgument("string", "The customer's account ID", required=True)
+    )
+    def reboot_modem(customer_id, **kwargs):
+        db = get_db()
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+        if not customer:
+            return {"response": "I couldn't find your account. Please verify your account number."}
+        modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
+        if not modem:
+            return {"response": "I couldn't find any modem information for your account."}
+        thread = threading.Thread(target=simulate_modem_reboot, args=(customer_id,))
+        thread.daemon = True
+        thread.start()
+        return {"response": "I've initiated a reboot of your modem. This will take about 30 seconds to complete."}
+
+    # SWAIG endpoint: Schedule Appointment
+    @swaig.endpoint(
+        "Schedule a service appointment",
+        customer_id=SWAIGArgument("string", "The customer's account ID", required=True),
+        type=SWAIGArgument("string", "Type of appointment (installation, repair, upgrade, modem_swap)", required=True),
+        date=SWAIGArgument("string", "Preferred date for the appointment (YYYY-MM-DD)", required=True)
+    )
+    def schedule_appointment(customer_id, type, date, **kwargs):
+        db = get_db()
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+        if not customer:
+            return {"response": "I couldn't find your account. Please verify your account number."}
+        if type not in ['installation', 'repair', 'upgrade', 'modem_swap']:
+            return {"response": "Invalid appointment type. Please choose from: installation, repair, upgrade, or modem_swap."}
+        try:
+            appointment_date = datetime.strptime(date, '%Y-%m-%d')
+            if appointment_date < datetime.now():
+                return {"response": "Please select a future date for the appointment."}
+        except ValueError:
+            return {"response": "Invalid date format. Please use YYYY-MM-DD."}
+        existing = db.execute('''
+            SELECT * FROM appointments 
+            WHERE customer_id = ? 
+            AND date(start_time) = date(?)
+        ''', (customer_id, appointment_date)).fetchone()
+        if existing:
+            return {"response": f"You already have an appointment scheduled for {date}. Please choose a different date."}
+        db.execute('''
+            INSERT INTO appointments (customer_id, type, status, start_time, end_time)
+            VALUES (?, ?, 'scheduled', ?, ?)
+        ''', (customer_id, type, appointment_date.strftime('%Y-%m-%d 09:00:00'), appointment_date.strftime('%Y-%m-%d 11:00:00')))
+        db.commit()
+        return {"response": f"I've scheduled your {type} appointment for {date}. You'll receive a confirmation text shortly."}
+
+    # SWAIG endpoint: Swap Modem
+    @swaig.endpoint(
+        "Schedule a modem swap appointment",
+        customer_id=SWAIGArgument("string", "The customer's account ID", required=True),
+        date=SWAIGArgument("string", "Preferred date for the modem swap (YYYY-MM-DD)", required=True)
+    )
+    def swap_modem(customer_id, date, **kwargs):
+        db = get_db()
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+        if not customer:
+            return {"response": "I couldn't find your account. Please verify your account number."}
+        current_modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
+        if not current_modem:
+            return {"response": "I couldn't find any modem information for your account."}
+        try:
+            appointment_date = datetime.strptime(date, '%Y-%m-%d')
+            if appointment_date < datetime.now():
+                return {"response": "Please select a future date for the modem swap."}
+        except ValueError:
+            return {"response": "Invalid date format. Please use YYYY-MM-DD."}
+        existing = db.execute('''
+            SELECT * FROM appointments 
+            WHERE customer_id = ? 
+            AND date(start_time) = date(?)
+        ''', (customer_id, appointment_date)).fetchone()
+        if existing:
+            return {"response": f"You already have an appointment scheduled for {date}. Please choose a different date."}
+        db.execute('''
+            INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes)
+            VALUES (?, 'modem_swap', 'scheduled', ?, ?, ?)
+        ''', (customer_id, appointment_date.strftime('%Y-%m-%d 10:00:00'), appointment_date.strftime('%Y-%m-%d 12:00:00'), f"Current MAC: {current_modem['mac_address']}"))
+        db.commit()
+        return {"response": f"I've scheduled your modem swap for {date}. A technician will bring your new modem and help you with the installation."}
 
 # Initialize SignalWire only if .env exists
 initialize_signalwire()
@@ -120,158 +266,6 @@ SIGNALWIRE_SPACE={signalwire_space}
         logger.error(f"Error generating .env file: {str(e)}")
         flash('Failed to generate environment configuration. Please try again.', 'danger')
         return render_template('populate.html')
-
-# SWAIG endpoint: Check Balance
-@swaig.endpoint(
-    "Check the current balance and due date for the customer's account",
-    customer_id=SWAIGArgument("string", "The customer's account ID", required=True)
-)
-def check_balance(customer_id, **kwargs):
-    if not swaig:
-        return {"response": "Service unavailable. Please try again later."}
-    db = get_db()
-    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
-    if not customer:
-        return {"response": "I couldn't find your account. Please verify your account number."}
-    billing = db.execute('''
-        SELECT * FROM billing 
-        WHERE customer_id = ? 
-        ORDER BY due_date DESC LIMIT 1
-    ''', (customer_id,)).fetchone()
-    if billing:
-        return {"response": f"Your current balance is ${billing['amount']:.2f}, due on {billing['due_date']}."}
-    return {"response": "I couldn't find any billing information for your account."}
-
-# SWAIG endpoint: Make Payment
-@swaig.endpoint(
-    "Make a payment on the customer's account",
-    customer_id=SWAIGArgument("string", "The customer's account ID", required=True),
-    amount=SWAIGArgument("number", "The amount to pay", required=True)
-)
-def make_payment(customer_id, amount, **kwargs):
-    if not swaig:
-        return {"response": "Service unavailable. Please try again later."}
-    db = get_db()
-    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
-    if not customer:
-        return {"response": "I couldn't find your account. Please verify your account number."}
-    if not amount or amount <= 0:
-        return {"response": "Please provide a valid payment amount."}
-    db.execute('''
-        INSERT INTO payments (customer_id, amount, payment_date, payment_method, status, transaction_id)
-        VALUES (?, ?, CURRENT_TIMESTAMP, 'phone', 'pending', ?)
-    ''', (customer_id, amount, secrets.token_hex(16)))
-    db.commit()
-    return {"response": f"I've initiated a payment of ${amount:.2f}. You'll receive a confirmation text shortly."}
-
-# SWAIG endpoint: Check Modem Status
-@swaig.endpoint(
-    "Check the current status of the customer's modem",
-    customer_id=SWAIGArgument("string", "The customer's account ID", required=True)
-)
-def check_modem_status(customer_id, **kwargs):
-    if not swaig:
-        return {"response": "Service unavailable. Please try again later."}
-    db = get_db()
-    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
-    if not customer:
-        return {"response": "I couldn't find your account. Please verify your account number."}
-    modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
-    if modem:
-        return {"response": f"Your modem is currently {modem['status']}. MAC address: {modem['mac_address']}."}
-    return {"response": "I couldn't find any modem information for your account."}
-
-# SWAIG endpoint: Reboot Modem
-@swaig.endpoint(
-    "Reboot the customer's modem",
-    customer_id=SWAIGArgument("string", "The customer's account ID", required=True)
-)
-def reboot_modem(customer_id, **kwargs):
-    if not swaig:
-        return {"response": "Service unavailable. Please try again later."}
-    db = get_db()
-    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
-    if not customer:
-        return {"response": "I couldn't find your account. Please verify your account number."}
-    modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
-    if not modem:
-        return {"response": "I couldn't find any modem information for your account."}
-    thread = threading.Thread(target=simulate_modem_reboot, args=(customer_id,))
-    thread.daemon = True
-    thread.start()
-    return {"response": "I've initiated a reboot of your modem. This will take about 30 seconds to complete."}
-
-# SWAIG endpoint: Schedule Appointment
-@swaig.endpoint(
-    "Schedule a service appointment",
-    customer_id=SWAIGArgument("string", "The customer's account ID", required=True),
-    type=SWAIGArgument("string", "Type of appointment (installation, repair, upgrade, modem_swap)", required=True),
-    date=SWAIGArgument("string", "Preferred date for the appointment (YYYY-MM-DD)", required=True)
-)
-def schedule_appointment(customer_id, type, date, **kwargs):
-    if not swaig:
-        return {"response": "Service unavailable. Please try again later."}
-    db = get_db()
-    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
-    if not customer:
-        return {"response": "I couldn't find your account. Please verify your account number."}
-    if type not in ['installation', 'repair', 'upgrade', 'modem_swap']:
-        return {"response": "Invalid appointment type. Please choose from: installation, repair, upgrade, or modem_swap."}
-    try:
-        appointment_date = datetime.strptime(date, '%Y-%m-%d')
-        if appointment_date < datetime.now():
-            return {"response": "Please select a future date for the appointment."}
-    except ValueError:
-        return {"response": "Invalid date format. Please use YYYY-MM-DD."}
-    existing = db.execute('''
-        SELECT * FROM appointments 
-        WHERE customer_id = ? 
-        AND date(start_time) = date(?)
-    ''', (customer_id, appointment_date)).fetchone()
-    if existing:
-        return {"response": f"You already have an appointment scheduled for {date}. Please choose a different date."}
-    db.execute('''
-        INSERT INTO appointments (customer_id, type, status, start_time, end_time)
-        VALUES (?, ?, 'scheduled', ?, ?)
-    ''', (customer_id, type, appointment_date.strftime('%Y-%m-%d 09:00:00'), appointment_date.strftime('%Y-%m-%d 11:00:00')))
-    db.commit()
-    return {"response": f"I've scheduled your {type} appointment for {date}. You'll receive a confirmation text shortly."}
-
-# SWAIG endpoint: Swap Modem
-@swaig.endpoint(
-    "Schedule a modem swap appointment",
-    customer_id=SWAIGArgument("string", "The customer's account ID", required=True),
-    date=SWAIGArgument("string", "Preferred date for the modem swap (YYYY-MM-DD)", required=True)
-)
-def swap_modem(customer_id, date, **kwargs):
-    if not swaig:
-        return {"response": "Service unavailable. Please try again later."}
-    db = get_db()
-    customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
-    if not customer:
-        return {"response": "I couldn't find your account. Please verify your account number."}
-    current_modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
-    if not current_modem:
-        return {"response": "I couldn't find any modem information for your account."}
-    try:
-        appointment_date = datetime.strptime(date, '%Y-%m-%d')
-        if appointment_date < datetime.now():
-            return {"response": "Please select a future date for the modem swap."}
-    except ValueError:
-        return {"response": "Invalid date format. Please use YYYY-MM-DD."}
-    existing = db.execute('''
-        SELECT * FROM appointments 
-        WHERE customer_id = ? 
-        AND date(start_time) = date(?)
-    ''', (customer_id, appointment_date)).fetchone()
-    if existing:
-        return {"response": f"You already have an appointment scheduled for {date}. Please choose a different date."}
-    db.execute('''
-        INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes)
-        VALUES (?, 'modem_swap', 'scheduled', ?, ?, ?)
-    ''', (customer_id, appointment_date.strftime('%Y-%m-%d 10:00:00'), appointment_date.strftime('%Y-%m-%d 12:00:00'), f"Current MAC: {current_modem['mac_address']}"))
-    db.commit()
-    return {"response": f"I've scheduled your modem swap for {date}. A technician will bring your new modem and help you with the installation."}
 
 @app.route('/swaig', methods=['GET', 'POST'])
 def swaig_endpoint():
@@ -863,8 +857,6 @@ def log_appointment_history(appointment_id, action, details):
         ) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
     ''', (appointment_id, action, json.dumps(details)))
     db.commit()
-
-print('SWAIG registered functions:', list(swaig.functions.keys()) if swaig else "SWAIG not initialized")
 
 if __name__ == '__main__':
     print("\n" + "="*50)
