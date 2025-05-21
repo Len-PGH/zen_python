@@ -100,6 +100,8 @@ SIGNALWIRE_PROJECT_ID={signalwire_project_id}
 SIGNALWIRE_TOKEN={signalwire_token}
 SIGNALWIRE_SPACE={signalwire_space}
 """
+
+    # Write to .env file
     try:
         with open('.env', 'w') as f:
             f.write(env_content)
@@ -107,7 +109,13 @@ SIGNALWIRE_SPACE={signalwire_space}
         load_dotenv(override=True)
         # Update global variables
         global SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, SIGNALWIRE_SPACE, HTTP_USERNAME, HTTP_PASSWORD
+        SIGNALWIRE_PROJECT_ID = os.getenv('SIGNALWIRE_PROJECT_ID')
+        SIGNALWIRE_TOKEN = os.getenv('SIGNALWIRE_TOKEN')
+        SIGNALWIRE_SPACE = os.getenv('SIGNALWIRE_SPACE')
+        HTTP_USERNAME = os.getenv('HTTP_USERNAME')
         HTTP_PASSWORD = os.getenv('HTTP_PASSWORD')
+        # Reinitialize SignalWire client with new credentials
+        global signalwire_client
         signalwire_client = SignalWireClient(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, signalwire_space_url=SIGNALWIRE_SPACE)
         # Reinitialize SWAIG with new credentials
         global swaig
@@ -115,6 +123,10 @@ SIGNALWIRE_SPACE={signalwire_space}
         logger.info("Generated .env file and reloaded environment variables")
         flash('Environment configuration saved successfully!', 'success')
         return redirect(url_for('index'))
+    except Exception as e:
+        logger.error(f"Error generating .env file: {str(e)}")
+        flash('Failed to generate environment configuration. Please try again.', 'danger')
+        return render_template('populate.html')
 
 # SWAIG endpoint: Check Balance
 @swaig.endpoint(
@@ -258,12 +270,7 @@ def swap_modem(customer_id, date, **kwargs):
 
 @app.route('/swaig', methods=['GET', 'POST'])
 def swaig_endpoint():
-    # POST requests are for dispatching function calls.
-
     if request.method == 'GET':
-        # For GET, return the signatures of registered functions.
-        # Assuming swaig.functions is a dict where keys are function names
-        # and values are the decorated function objects which might contain signature info.
         return jsonify(list(swaig.functions.keys()))
 
     if not request.is_json:
@@ -273,7 +280,6 @@ def swaig_endpoint():
     function_name = data.get('function')
     arguments = data.get('arguments', {})
 
-    # Remove unexpected 'meta_data' argument if present
     if 'meta_data' in arguments:
         del arguments['meta_data']
 
