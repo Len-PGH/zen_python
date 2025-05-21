@@ -65,7 +65,6 @@ def initialize_signalwire():
                     SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, signalwire_space_url=SIGNALWIRE_SPACE
                 )
                 swaig = SWAIG(app, auth=(HTTP_USERNAME, HTTP_PASSWORD))
-                register_swaig_endpoints()  # Register endpoints after SWAIG initialization
                 logger.info("SignalWire client and SWAIG initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize SignalWire client or SWAIG: {str(e)}")
@@ -223,12 +222,14 @@ def register_swaig_endpoints():
         db.commit()
         return {"response": f"I've scheduled your modem swap for {date}. A technician will bring your new modem and help you with the installation."}
 
-# Initialize SignalWire only if .env exists
+# Initialize SignalWire and register endpoints at startup
 initialize_signalwire()
+if swaig:  # Only register endpoints if SWAIG is initialized
+    register_swaig_endpoints()
 
 # Environment Configuration
 HOST = '0.0.0.0'
-PORT = int(os.getenv('PORT', 5000))  # Default to 5000, but respect Replit's PORT
+PORT = 8080  # Changed to 8080 for Replit compatibility
 DEBUG = os.getenv('FLASK_ENV') == 'development'
 
 # Route to serve populate.html if .env doesn't exist
@@ -253,14 +254,13 @@ HTTP_PASSWORD={http_password}
 SIGNALWIRE_PROJECT_ID={signalwire_project_id}
 SIGNALWIRE_TOKEN={signalwire_token}
 SIGNALWIRE_SPACE={signalwire_space}
+PORT=8080
 """
     try:
         with open('.env', 'w') as f:
             f.write(env_content)
-        # Reload environment variables and reinitialize SignalWire
-        initialize_signalwire()
-        logger.info("Generated .env file and reloaded environment variables")
-        flash('Environment configuration saved successfully!', 'success')
+        logger.info("Generated .env file")
+        flash('Environment configuration saved successfully! Please restart the application to apply changes.', 'success')
         return redirect(url_for('index'))
     except Exception as e:
         logger.error(f"Error generating .env file: {str(e)}")
@@ -270,7 +270,7 @@ SIGNALWIRE_SPACE={signalwire_space}
 @app.route('/swaig', methods=['GET', 'POST'])
 def swaig_endpoint():
     if not swaig:
-        return jsonify({"error": "Service unavailable. Please configure environment variables."}), 503
+        return jsonify({"error": "Service unavailable. Please configure environment variables and restart the application."}), 503
     if request.method == 'GET':
         return jsonify(list(swaig.functions.keys()))
     if not request.is_json:
@@ -701,7 +701,7 @@ def get_appointment_reminders(appointment_id):
 @login_required
 def send_appointment_reminder_now(appointment_id):
     if not signalwire_client:
-        return jsonify({'error': 'Service unavailable. Please configure environment variables.'}), 503
+        return jsonify({'error': 'Service unavailable. Please configure environment variables and restart the application.'}), 503
     db = get_db()
     appointment = db.execute('''
         SELECT * FROM appointments 
@@ -721,7 +721,7 @@ def send_appointment_reminder_now(appointment_id):
 @app.route('/reminder_call/<int:appointment_id>', methods=['POST'])
 def reminder_call(appointment_id):
     if not signalwire_client:
-        return jsonify({'error': 'Service unavailable. Please configure environment variables.'}), 503
+        return jsonify({'error': 'Service unavailable. Please configure environment variables and restart the application.'}), 503
     logger.info(f"Received reminder call request for appointment {appointment_id}")
     db = get_db()
     appointment = db.execute('SELECT * FROM appointments WHERE id = ?', 
