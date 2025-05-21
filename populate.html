@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Generate .env File</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+  <div class="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
+    <h1 class="text-2xl font-bold mb-4 text-center">Populate with your credentials</h1>
+    <form id="envForm" class="space-y-4">
+      <div>
+        <label for="httpUsername" class="block text-sm font-medium text-gray-700">HTTP Username</label>
+        <input type="text" id="httpUsername" name="httpUsername" value="fakeuser123" required
+               class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+      </div>
+      <div>
+        <label for="httpPassword" class="block text-sm font-medium text-gray-700">HTTP Password</label>
+        <input type="text" id="httpPassword" name="httpPassword" value="fakepass456" required
+               class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+      </div>
+      <div>
+        <label for="signalwireProjectId" class="block text-sm font-medium text-gray-700">SignalWire Project ID</label>
+        <input type="text" id="signalwireProjectId" name="signalwireProjectId" value="a1b2c3d4-e5f6-4a3b-8c9d-1234567890ab" required
+               class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+      </div>
+      <div>
+        <label for="signalwireToken" class="block text-sm font-medium text-gray-700">SignalWire Token</label>
+        <input type="text" id="signalwireToken" name="signalwireToken" value="PT1234567890abcdef1234567890abcdef1234567890abcdef12" required
+               class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+      </div>
+      <div>
+        <label for="signalwireSpace" class="block text-sm font-medium text-gray-700">SignalWire Space</label>
+        <input type="text" id="signalwireSpace" name="signalwireSpace" value="fakespace" required
+               class="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+      </div>
+      <button type="submit" class="w-full bg-blue-500 text-white p-2 rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        Generate .env
+      </button>
+    </form>
+    <div id="output" class="mt-4 hidden">
+      <h2 class="text-lg font-semibold">Generated .env Content</h2>
+      <pre id="envOutput" class="bg-gray-800 text-white p-4 rounded-md overflow-auto"></pre>
+      <button id="copyButton" class="mt-2 w-full bg-green-500 text-white p-2 rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500">
+        Copy to Clipboard
+      </button>
+    </div>
+  </div>
+  <script>
+    document.getElementById('envForm').addEventListener('submit', function(event) {
+      event.preventDefault();
+      const httpUsername = document.getElementById('httpUsername').value;
+      const httpPassword = document.getElementById('httpPassword').value;
+      const signalwireProjectId = document.getElementById('signalwireProjectId').value;
+      const signalwireToken = document.getElementById('signalwireToken').value;
+      const signalwireSpace = document.getElementById('signalwireSpace').value;
+
+      const envContent = `HTTP_USERNAME=${httpUsername}
+HTTP_PASSWORD=${httpPassword}
+SIGNALWIRE_PROJECT_ID=${signalwireProjectId}
+SIGNALWIRE_TOKEN=${signalwireToken}
+SIGNALWIRE_SPACE=${signalwireSpace}`;
+
+      const outputDiv = document.getElementById('output');
+      const envOutput = document.getElementById('envOutput');
+      envOutput.textContent = envContent;
+      outputDiv.classList.remove('hidden');
+    });
+
+    document.getElementById('copyButton').addEventListener('click', function() {
+      const envOutput = document.getElementById('envOutput').textContent;
+      navigator.clipboard.writeText(envOutput).then(() => {
+        alert('Copied to clipboard!');
+      }).catch(err => {
+        console.error('Failed to copy: ', err);
+        alert('Failed to copy to clipboard.');
+      });
+    });
+  </script>
+</body>
+</html>
