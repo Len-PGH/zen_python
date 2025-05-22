@@ -6,22 +6,13 @@
   <title>Zen Cable - Customer Dashboard</title>
 
   <!-- Bootstrap & FullCalendar CSS -->
-  <link
-    href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css"
-    rel="stylesheet"
-  />
-  <link
-    href="https://cdn.jsdelivr.net/npm/fullcalendar@5.10.1/main.min.css"
-    rel="stylesheet"
-  />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/fullcalendar@5.10.1/main.min.css" rel="stylesheet" />
 
   <!-- Your custom styles -->
-  <link
-    href="{{ url_for('static', filename='css/style.css') }}"
-    rel="stylesheet"
-  />
+  <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet" />
 
-  <!-- Inline status‐color rules -->
+  <!-- Inline status-color rules -->
   <style>
     .status-indicator {
       width: 12px;
@@ -47,20 +38,13 @@
   <nav class="navbar navbar-expand-lg navbar-dark bg-dark border-bottom border-secondary">
     <div class="container">
       <a class="navbar-brand" href="#">Zen Cable</a>
-      <button
-        class="navbar-toggler"
-        type="button"
-        data-bs-toggle="collapse"
-        data-bs-target="#navbarNav"
-      >
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
         <span class="navbar-toggler-icon"></span>
       </button>
       <div class="collapse navbar-collapse" id="navbarNav">
         <ul class="navbar-nav me-auto">
           <li class="nav-item">
-            <a class="nav-link active" href="{{ url_for('dashboard') }}">
-              Dashboard
-            </a>
+            <a class="nav-link active" href="{{ url_for('dashboard') }}">Dashboard</a>
           </li>
           <li class="nav-item">
             <a class="nav-link" href="#appointments">Appointments</a>
@@ -87,13 +71,11 @@
         <div class="card bg-dark border-secondary">
           <div class="card-body">
             <h5 class="card-title">Account Balance</h5>
-            <h2 class="text-{{ 'success' if billing.status=='paid' else 'warning' }}">
+            <h2 id="balance" class="text-{{ 'success' if billing.status=='paid' else 'warning' }}">
               ${{ "%.2f"|format(billing.amount) }}
             </h2>
             <p class="text-muted">Due: {{ billing.due_date }}</p>
-            <button class="btn btn-primary w-100" onclick="showPaymentModal()">
-              Make Payment
-            </button>
+            <button class="btn btn-primary w-100" onclick="showPaymentModal()">Make Payment</button>
           </div>
         </div>
       </div>
@@ -110,11 +92,7 @@
               </h3>
             </div>
             <p class="text-muted">MAC: {{ modem.mac_address }}</p>
-            <button
-              id="rebootModem"
-              class="btn btn-outline-primary w-100"
-              onclick="updateModemStatus('rebooting')"
-            >
+            <button id="rebootModem" class="btn btn-outline-primary w-100" onclick="updateModemStatus('rebooting')">
               Reboot Modem
             </button>
           </div>
@@ -166,13 +144,7 @@
           <form id="paymentForm">
             <div class="mb-3">
               <label class="form-label">Amount</label>
-              <input
-                type="number"
-                class="form-control bg-dark text-light"
-                value="{{ billing.amount }}"
-                step="0.01"
-                required
-              />
+              <input type="number" class="form-control bg-dark text-light" value="{{ billing.amount }}" step="0.01" required />
             </div>
             <div class="mb-3">
               <label class="form-label">Payment Method</label>
@@ -206,14 +178,18 @@
         events: '/api/appointments',
         editable: true
       }).render();
+
+      // Initial calls to set values immediately
+      pollModemStatus();
+      pollBalance();
     });
 
     // Update Modem Status
     function updateModemStatus(status) {
       const statusBadge = document.getElementById('modemStatus');
-      const statusText  = document.getElementById('modemStatusText');
-      const rebootBtn   = document.getElementById('rebootModem');
-      const allStates   = ['online','offline','rebooting','initializing'];
+      const statusText = document.getElementById('modemStatusText');
+      const rebootBtn = document.getElementById('rebootModem');
+      const allStates = ['online', 'offline', 'rebooting', 'initializing'];
 
       // Clear old classes
       allStates.forEach(s => {
@@ -221,15 +197,14 @@
         statusText.classList.remove(s);
       });
 
-      // Apply new
+      // Apply new classes and text
       statusBadge.classList.add(status);
       statusText.classList.add(status);
       statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
 
       if (status === 'rebooting') {
         rebootBtn.disabled = true;
-        rebootBtn.innerHTML =
-          '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Rebooting...';
+        rebootBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Rebooting...';
 
         // Poll until online
         const poll = setInterval(() => {
@@ -240,8 +215,10 @@
                 clearInterval(poll);
                 updateModemStatus('online');
                 rebootBtn.disabled = false;
+                rebootBtn.textContent = 'Reboot Modem';
               }
-            });
+            })
+            .catch(error => console.error('Error polling modem status:', error));
         }, 5000);
       } else {
         rebootBtn.disabled = false;
@@ -249,15 +226,59 @@
       }
     }
 
+    // Function to poll modem status dynamically
+    function pollModemStatus() {
+      fetch('/api/modem/status')
+        .then(response => response.json())
+        .then(data => {
+          if (data.status) {
+            const statusBadge = document.getElementById('modemStatus');
+            const statusText = document.getElementById('modemStatusText');
+            const allStates = ['online', 'offline', 'rebooting', 'initializing'];
+
+            // Clear old classes
+            allStates.forEach(s => {
+              statusBadge.classList.remove(s);
+              statusText.classList.remove(s);
+            });
+
+            // Apply new classes and text
+            statusBadge.classList.add(data.status);
+            statusText.classList.add(data.status);
+            statusText.textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
+          }
+        })
+        .catch(error => console.error('Error fetching modem status:', error));
+    }
+
+    // Function to poll balance dynamically
+    function pollBalance() {
+      fetch('/api/billing/balance')
+        .then(response => response.json())
+        .then(data => {
+          if (data.balance !== undefined) {
+            const balanceElement = document.getElementById('balance');
+            balanceElement.textContent = `$${data.balance.toFixed(2)}`;
+            balanceElement.className = data.balance <= 0 ? 'text-success' : 'text-warning';
+          }
+        })
+        .catch(error => console.error('Error fetching balance:', error));
+    }
+
+    // Poll every 5 seconds
+    setInterval(pollModemStatus, 5000);
+    setInterval(pollBalance, 5000);
+
     // Payment modal
     function showPaymentModal() {
       new bootstrap.Modal(document.getElementById('paymentModal')).show();
     }
-    document.getElementById('paymentForm')
-      .addEventListener('submit', e => {
-        e.preventDefault();
-        // handle payment...
-      });
+
+    document.getElementById('paymentForm').addEventListener('submit', e => {
+      e.preventDefault();
+      // Handle payment submission (e.g., call make_payment SWAIG function)
+      // After successful payment, the pollBalance function will update the UI
+    });
   </script>
 </body>
 </html>
