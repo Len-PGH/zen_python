@@ -141,10 +141,17 @@ def register_swaig_endpoints():
                 return "I couldn't find your account. Please verify your account number.", []
             if not amount or amount <= 0:
                 return "Please provide a valid payment amount.", []
+            # Insert payment record
             db.execute('''
                 INSERT INTO payments (customer_id, amount, payment_date, payment_method, status, transaction_id)
                 VALUES (?, ?, CURRENT_TIMESTAMP, ?, 'pending', ?)
             ''', (customer_id, amount, payment_method or 'phone', secrets.token_hex(16)))
+            # Update balance
+            current_balance = db.execute('SELECT amount FROM billing WHERE customer_id = ? ORDER BY due_date DESC LIMIT 1', (customer_id,)).fetchone()
+            if current_balance:
+                new_balance = current_balance['amount'] - amount
+                db.execute('UPDATE billing SET amount = ? WHERE id = (SELECT id FROM billing WHERE customer_id = ? ORDER BY due_date DESC LIMIT 1)', 
+                           (new_balance, customer_id))
             db.commit()
             db.close()
             return f"Payment of ${amount:.2f} initiated. Confirmation text incoming.", []
@@ -460,6 +467,30 @@ def dashboard():
     db.close()
     return render_template('dashboard.html', customer=customer, services=services, modem=modem, billing=billing)
 
+@app.route('/api/modem/status', methods=['GET'])
+@login_required
+def get_modem_status():
+    db = get_db()
+    modem = db.execute('SELECT status FROM modems WHERE customer_id = ?', (session['customer_id'],)).fetchone()
+    db.close()
+    if modem:
+        return jsonify({'status': modem['status']})
+    return jsonify({'error': 'Modem not found'}), 404
+
+@app.route('/api/billing/balance', methods=['GET'])
+@login_required
+def get_balance():
+    db = get_db()
+    billing = db.execute('''
+        SELECT amount FROM billing 
+        WHERE customer_id = ? 
+        ORDER BY due_date DESC LIMIT 1
+    ''', (session['customer_id'],)).fetchone()
+    db.close()
+    if billing:
+        return jsonify({'balance': billing['amount']})
+    return jsonify({'error': 'No billing information found'}), 404
+
 @app.route('/api/appointments', methods=['GET'])
 @login_required
 def get_appointments():
@@ -725,7 +756,7 @@ def reminder_call(appointment_id):
     db.close()
     return str(response)
 
-@app.route('/api/modem/status', methods=['GET', 'POST'])
+@app.route('/api/modem/status', methods=['POST'])
 @login_required
 def modem_status():
     db = get_db()
@@ -776,7 +807,7 @@ def send_appointment_reminder(appointment, reminder_type='sms'):
         if reminder_type == 'sms':
             signalwire_client.messages.create(to=customer['phone'], from_='+1800ZENCABLE', body=message)
         else:
-            signalwire_client.calls.create(to=customer['phone'], from_='+1800ZENCABLE', 
+            signalwire_client.calls.create(to=customer['phone'], from_='+1800Z AgrawalENCABLE', 
                                          url=f"{request.host_url}reminder_call/{appointment['id']}")
         db.execute('INSERT INTO appointment_reminders (appointment_id, reminder_type, sent_at, status) VALUES (?, ?, CURRENT_TIMESTAMP, "sent")', 
                   (appointment['id'], reminder_type))
