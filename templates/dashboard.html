@@ -91,7 +91,7 @@
                 {{ modem.status|title }}
               </h3>
             </div>
-            <p class="text-muted">MAC: {{ modem.mac_address }}</p>
+            <p id="macAddress" class="text-muted">MAC: {{ modem.mac_address }}</p>
             <button id="rebootModem" class="btn btn-outline-primary w-100" onclick="updateModemStatus('rebooting')">
               Reboot Modem
             </button>
@@ -165,10 +165,10 @@
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fullcalendar@5.10.1/main.min.js"></script>
   <script>
-    // FullCalendar init
+    let calendar;
     document.addEventListener('DOMContentLoaded', () => {
       const calendarEl = document.getElementById('calendar');
-      new FullCalendar.Calendar(calendarEl, {
+      calendar = new FullCalendar.Calendar(calendarEl, {
         initialView: 'timeGridWeek',
         headerToolbar: {
           left: 'prev,next today',
@@ -177,11 +177,17 @@
         },
         events: '/api/appointments',
         editable: true
-      }).render();
+      });
+      calendar.render();
 
       // Initial calls to set values immediately
       pollModemStatus();
       pollBalance();
+
+      // Set interval to refetch events every 60 seconds
+      setInterval(() => {
+        calendar.refetchEvents();
+      }, 60000);
     });
 
     // Update Modem Status
@@ -246,6 +252,11 @@
             statusBadge.classList.add(data.status);
             statusText.classList.add(data.status);
             statusText.textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
+
+            // Update MAC address
+            if (data.mac_address) {
+              document.getElementById('macAddress').textContent = 'MAC: ' + data.mac_address;
+            }
           }
         })
         .catch(error => console.error('Error fetching modem status:', error));
