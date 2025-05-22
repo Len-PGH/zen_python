@@ -17,10 +17,6 @@ import schedule
 from signalwire.voice_response import VoiceResponse
 import sys
 
-# Function to generate a random MAC address
-def generate_mac_address():
-    return ':'.join(['%02x' % secrets.randbelow(256) for _ in range(6)])
-
 # Configure logging
 def setup_logging():
     if not os.path.exists('logs'):
@@ -281,7 +277,7 @@ def register_swaig_endpoints():
             return "Error scheduling appointment.", []
 
     @swaig.endpoint(
-        "Schedule a modem swap appointment and swap the modem",
+        "Schedule a modem swap appointment",
         SWAIGFunctionProperties(
             active=True,
             wait_for_fillers=True,
@@ -321,11 +317,9 @@ def register_swaig_endpoints():
                 INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes)
                 VALUES (?, 'modem_swap', 'scheduled', ?, ?, ?)
             ''', (customer_id, appointment_date.strftime('%Y-%m-%d 10:00:00'), appointment_date.strftime('%Y-%m-%d 12:00:00'), f"Current MAC: {modem['mac_address']}"))
-            new_mac = generate_mac_address()
-            db.execute('UPDATE modems SET mac_address = ? WHERE customer_id = ?', (new_mac, customer_id))
             db.commit()
             db.close()
-            return f"Modem swap scheduled for {date}. New MAC address: {new_mac}.", []
+            return f"Modem swap scheduled for {date}. A technician will assist you.", []
         except ValueError:
             return "Invalid date format. Use YYYY-MM-DD.", []
         except Exception as e:
@@ -477,10 +471,10 @@ def dashboard():
 @login_required
 def get_modem_status():
     db = get_db()
-    modem = db.execute('SELECT status, mac_address FROM modems WHERE customer_id = ?', (session['customer_id'],)).fetchone()
+    modem = db.execute('SELECT status FROM modems WHERE customer_id = ?', (session['customer_id'],)).fetchone()
     db.close()
     if modem:
-        return jsonify({'status': modem['status'], 'mac_address': modem['mac_address']})
+        return jsonify({'status': modem['status']})
     return jsonify({'error': 'Modem not found'}), 404
 
 @app.route('/api/billing/balance', methods=['GET'])
@@ -500,22 +494,6 @@ def get_balance():
 @app.route('/api/appointments', methods=['GET'])
 @login_required
 def get_appointments():
-    if 'start' in request.args and 'end' in request.args:
-        # Return events for FullCalendar
-        db = get_db()
-        appointments = db.execute('SELECT id, type, start_time, end_time FROM appointments WHERE customer_id = ? AND start_time >= ? AND start_time <= ?',
-                                  (session['customer_id'], request.args['start'], request.args['end'])).fetchall()
-        events = [
-            {
-                'id': appt['id'],
-                'title': appt['type'],
-                'start': appt['start_time'],
-                'end': appt['end_time']
-            } for appt in appointments
-        ]
-        db.close()
-        return jsonify(events)
-    # Existing paginated response
     start = request.args.get('start')
     end = request.args.get('end')
     page = max(1, request.args.get('page', 1, type=int))
@@ -829,7 +807,7 @@ def send_appointment_reminder(appointment, reminder_type='sms'):
         if reminder_type == 'sms':
             signalwire_client.messages.create(to=customer['phone'], from_='+1800ZENCABLE', body=message)
         else:
-            signalwire_client.calls.create(to=customer['phone'], from_='+1800ZENCABLE', 
+            signalwire_client.calls.create(to=customer['phone'], from_='+1800Z AgrawalENCABLE', 
                                          url=f"{request.host_url}reminder_call/{appointment['id']}")
         db.execute('INSERT INTO appointment_reminders (appointment_id, reminder_type, sent_at, status) VALUES (?, ?, CURRENT_TIMESTAMP, "sent")', 
                   (appointment['id'], reminder_type))
@@ -855,7 +833,7 @@ def schedule_reminders(appointment):
 def log_appointment_history(appointment_id, action, details):
     db = get_db()
     try:
-        db.execute('INSERT INTO appointment_history (appointment_id, action, details, created_at) VALUES Juniors(?, ?, ?, CURRENT_TIMESTAMP)', 
+        db.execute('INSERT INTO appointment_history (appointment_id, action, details, created_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)', 
                   (appointment_id, action, json.dumps(details)))
         db.commit()
     except Exception as e:
