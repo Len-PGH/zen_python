@@ -244,21 +244,21 @@ def register_swaig_endpoints():
             customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
             if not customer:
                 return "I couldn't find your account. Please verify your account number.", []
-            
+
             modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
             if not modem:
                 return "No modem information found for your account.", []
-            
+
             # Update modem status to rebooting
             db.execute('UPDATE modems SET status = "rebooting", last_seen = CURRENT_TIMESTAMP WHERE customer_id = ?', 
                       (customer_id,))
             db.commit()
-            
+
             # Start the reboot simulation in a background thread
             thread = threading.Thread(target=simulate_modem_reboot, args=(customer_id,))
             thread.daemon = True
             thread.start()
-            
+
             db.close()
             return "Modem reboot initiated. This will take about 30 seconds.", []
         except Exception as e:
@@ -376,7 +376,7 @@ def register_swaig_endpoints():
                 try:
                     compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
                     appointment_time = appointment['start_time']
-                    message = f"Your {appointment['type']} appointment is scheduled for {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
+                    message = f"Your {appointment['type']} appointment (Job #{appointment['job_number']}) is scheduled for {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
                     payload = {
                         "From": FROM_NUMBER,
                         "To": customer['phone'],
@@ -515,7 +515,7 @@ def register_swaig_endpoints():
                 try:
                     compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
                     appointment_time = updated_appointment['start_time']
-                    message = f"Your {updated_appointment['type']} appointment has been rescheduled to {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
+                    message = f"Your {updated_appointment['type']} appointment (Job #{updated_appointment['job_number']}) has been rescheduled to {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
                     payload = {
                         "From": FROM_NUMBER,
                         "To": customer['phone'],
@@ -603,7 +603,7 @@ def register_swaig_endpoints():
                 try:
                     compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
                     appointment_time = updated_appointment['start_time']
-                    message = f"Your {updated_appointment['type']} appointment for {appointment_time} has been cancelled. Call 1-800-ZEN-CABLE to reschedule."
+                    message = f"Your {updated_appointment['type']} appointment (Job #{updated_appointment['job_number']}) for {appointment_time} has been cancelled. Call 1-800-ZEN-CABLE to reschedule."
                     payload = {
                         "From": FROM_NUMBER,
                         "To": customer['phone'],
@@ -660,25 +660,25 @@ def register_swaig_endpoints():
             customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
             if not customer:
                 return "I couldn't find your account. Please verify your account number.", []
-            
+
             # Format MAC address
             formatted_mac = format_mac_address(mac_address)
             if not formatted_mac:
                 return "Invalid MAC address. Please provide a valid 12-character MAC address.", []
-            
+
             # Check if MAC address is already in use
             existing = db.execute('SELECT * FROM modems WHERE mac_address = ? AND customer_id != ?', 
                                 (formatted_mac, customer_id)).fetchone()
             if existing:
                 return "This MAC address is already registered to another customer. Please provide a different MAC address.", []
-            
+
             # Update modem information
             db.execute('''
                 UPDATE modems 
                 SET make = ?, model = ?, mac_address = ?, last_updated = CURRENT_TIMESTAMP
                 WHERE customer_id = ?
             ''', (make, model, formatted_mac, customer_id))
-            
+
             # Log the modem swap
             db.execute('''
                 INSERT INTO modem_history (customer_id, action, details, created_at)
@@ -688,15 +688,15 @@ def register_swaig_endpoints():
                 'model': model,
                 'mac_address': formatted_mac
             })))
-            
+
             db.commit()
-            
+
             # Get updated modem info
             modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
             db.close()
-            
+
             return f"Modem information updated successfully. Your new modem is a {make} {model} with MAC address {formatted_mac}.", []
-            
+
         except Exception as e:
             app.logger.error(f"Error in swap_modem: {str(e)}")
             return "Error updating modem information.", []
@@ -896,7 +896,7 @@ def dashboard():
         ORDER BY due_date DESC LIMIT 1
     ''', (session['customer_id'],)).fetchone()
     db.close()
-    
+
     # Create a default billing object if none exists
     if not billing:
         billing = {
@@ -904,7 +904,7 @@ def dashboard():
             'due_date': datetime.now().strftime('%Y-%m-%d'),
             'status': 'no_billing'
         }
-    
+
     # Create a default modem object if none exists
     if not modem:
         modem = {
@@ -913,7 +913,7 @@ def dashboard():
             'make': 'Unknown',
             'model': 'Unknown'
         }
-    
+
     return render_template('dashboard.html', customer=customer, services=services, modem=modem, billing=billing)
 
 @app.route('/api/modem/status', methods=['GET'])
@@ -1040,7 +1040,7 @@ def appointments():
     # Fetch customer details to include in the template context
     customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
     db.close()
-    
+
     return render_template('appointments.html', appointments=appointments, customer=customer)
 
 @app.route('/billing')
@@ -1063,11 +1063,11 @@ def billing():
         ORDER BY payment_date DESC
     ''', (session['customer_id'],)).fetchall()
     db.close()
-    
+
     # Handle case when current_balance is None
     balance_amount = current_balance['amount'] if current_balance else 0
     due_date = current_balance['due_date'] if current_balance else datetime.now()
-    
+
     return render_template('billing.html', 
                          customer=customer,
                          current_balance=balance_amount,
@@ -1104,20 +1104,20 @@ def modem_status():
 def swap_modem():
     if not request.json:
         return jsonify({'error': 'No data provided'}), 400
-    
+
     required_fields = ['make', 'model', 'mac_address']
     if not all(field in request.json for field in required_fields):
         return jsonify({'error': 'Missing required fields'}), 400
-    
+
     make = request.json['make'].strip()
     model = request.json['model'].strip()
     mac_address = request.json['mac_address'].strip()
-    
+
     # Validate MAC address format
     import re
     if not re.match(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', mac_address):
         return jsonify({'error': 'Invalid MAC address format'}), 400
-    
+
     db = get_db()
     try:
         # Check if MAC address is already in use
@@ -1125,14 +1125,14 @@ def swap_modem():
                             (mac_address, session['customer_id'])).fetchone()
         if existing:
             return jsonify({'error': 'This MAC address is already registered to another customer'}), 400
-        
+
         # Update modem information
         db.execute('''
             UPDATE modems 
             SET make = ?, model = ?, mac_address = ?, last_updated = CURRENT_TIMESTAMP
             WHERE customer_id = ?
         ''', (make, model, mac_address, session['customer_id']))
-        
+
         # Log the modem swap
         db.execute('''
             INSERT INTO modem_history (customer_id, action, details, created_at)
@@ -1142,15 +1142,15 @@ def swap_modem():
             'model': model,
             'mac_address': mac_address
         })))
-        
+
         db.commit()
-        
+
         # Get updated modem info
         modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (session['customer_id'],)).fetchone()
         db.close()
-        
+
         return jsonify(dict(modem))
-        
+
     except Exception as e:
         app.logger.error(f"Error swapping modem: {str(e)}")
         return jsonify({'error': 'Failed to update modem information'}), 500
@@ -1230,11 +1230,11 @@ def settings():
 def update_profile():
     if not request.json:
         return jsonify({'error': 'No data provided'}), 400
-    
+
     required_fields = ['first_name', 'last_name', 'phone', 'address']
     if not all(field in request.json for field in required_fields):
         return jsonify({'error': 'Missing required fields'}), 400
-    
+
     db = get_db()
     try:
         db.execute('''
@@ -1257,17 +1257,17 @@ def update_profile():
 def change_password():
     if not request.json:
         return jsonify({'error': 'No data provided'}), 400
-    
+
     required_fields = ['current_password', 'new_password']
     if not all(field in request.json for field in required_fields):
         return jsonify({'error': 'Missing required fields'}), 400
-    
+
     db = get_db()
     customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
-    
+
     if not verify_password(request.json['current_password'], customer['password_hash'], customer['password_salt']):
         return jsonify({'error': 'Current password is incorrect'}), 400
-    
+
     try:
         password_hash, password_salt = hash_password(request.json['new_password'])
         db.execute('''
@@ -1372,18 +1372,53 @@ def verify_mfa():
         app.logger.error(f"Error verifying MFA code: {str(e)}")
         return jsonify({'error': 'Failed to verify code'}), 500
 
+@app.route('/api/payments', methods=['POST'])
+def process_payment():
+    if not request.json:
+        return jsonify({'error': 'No data provided'}), 400
+
+    required_fields = ['amount', 'payment_method']
+    if not all(field in request.json for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+
+    db = get_db()
+    try:
+        # Insert payment record
+        transaction_id = secrets.token_hex(16)
+        db.execute('''
+            INSERT INTO payments (customer_id, amount, payment_method, status, transaction_id)
+            VALUES (?, ?, ?, 'completed', ?)
+        ''', (session['customer_id'], request.json['amount'], request.json['payment_method'], transaction_id))
+
+        # Update balance
+        current_balance = db.execute('SELECT amount FROM billing WHERE customer_id = ? ORDER BY due_date DESC LIMIT 1', 
+                                   (session['customer_id'],)).fetchone()
+        if current_balance:
+            new_balance = current_balance['amount'] - float(request.json['amount'])
+            db.execute('UPDATE billing SET amount = ? WHERE customer_id = ?', 
+                      (new_balance, session['customer_id']))
+
+        db.commit()
+        return jsonify({'success': True, 'transaction_id': transaction_id})
+    except Exception as e:
+        db.rollback()
+        app.logger.error(f"Error processing payment: {str(e)}")
+        return jsonify({'error': 'Failed to process payment'}), 500
+    finally:
+        db.close()
+
 @app.route('/api/password/reset/complete', methods=['POST'])
 def complete_password_reset():
     if not session.get('password_reset_verified'):
         return jsonify({'error': 'Please verify your identity first'}), 400
-    
+
     if not request.json or 'new_password' not in request.json:
         return jsonify({'error': 'No new password provided'}), 400
-    
+
     customer_id = session.get('password_reset_customer_id')
     if not customer_id:
         return jsonify({'error': 'Invalid reset session'}), 401
-    
+
     db = get_db()
     try:
         # Update the password
@@ -1393,19 +1428,19 @@ def complete_password_reset():
             SET password_hash = ?, password_salt = ?
             WHERE id = ?
         ''', (password_hash, password_salt, customer_id))
-        
+
         # Clear used reset tokens
         db.execute('DELETE FROM password_resets WHERE customer_id = ?', (customer_id,))
-        
+
         db.commit()
         db.close()
-        
+
         # Clear session data
         session.pop('password_reset_verified', None)
         session.pop('password_reset_mfa_id', None)
         session.pop('password_reset_id', None)
         session.pop('password_reset_customer_id', None)
-        
+
         return jsonify({'message': 'Password reset successfully'})
     except Exception as e:
         app.logger.error(f"Error completing password reset: {str(e)}")
@@ -1458,11 +1493,11 @@ def create_appointment():
         # Validate appointment type
         if request.json['type'] not in ['installation', 'repair', 'upgrade', 'modem_swap']:
             return jsonify({'error': 'Invalid appointment type'}), 400
-        
+
         # Validate time slot
         if request.json['time_slot'] not in ['morning', 'afternoon', 'evening', 'all_day']:
             return jsonify({'error': 'Invalid time slot'}), 400
-        
+
         # Parse date
         try:
             appointment_date = datetime.strptime(request.json['date'], '%Y-%m-%d')
@@ -1470,17 +1505,17 @@ def create_appointment():
                 return jsonify({'error': 'Please select a future date'}), 400
         except ValueError:
             return jsonify({'error': 'Invalid date format'}), 400
-        
+
         # Check for existing appointments
         existing = db.execute('''
             SELECT * FROM appointments 
             WHERE customer_id = ? 
             AND date(start_time) = date(?)
         ''', (session['customer_id'], appointment_date)).fetchone()
-        
+
         if existing:
             return jsonify({'error': f'You already have an appointment on {request.json["date"]}'}), 400
-        
+
         # Set time slots
         time_slots = {
             'morning': ('08:00 AM', '11:00 AM'),
@@ -1489,7 +1524,7 @@ def create_appointment():
             'all_day': ('08:00 AM', '08:00 PM')
         }
         start_time, end_time = time_slots[request.json['time_slot']]
-        
+
         # Check if time slot is available
         slot_conflict = db.execute('''
             SELECT * FROM appointments 
@@ -1503,13 +1538,13 @@ def create_appointment():
               f"{request.json['date']} {end_time}", f"{request.json['date']} {start_time}",
               f"{request.json['date']} {end_time}", f"{request.json['date']} {start_time}",
               f"{request.json['date']} {start_time}", f"{request.json['date']} {end_time}")).fetchone()
-        
+
         if slot_conflict:
             return jsonify({'error': f'The {request.json["time_slot"]} time slot on {request.json["date"]} is already booked'}), 400
-        
+
         # Generate job number
         job_number = generate_job_number()
-        
+
         # Insert appointment
         cursor = db.execute('''
             INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes, sms_reminder, job_number)
@@ -1521,9 +1556,9 @@ def create_appointment():
               request.json.get('notes', ''),
               request.json.get('sms_reminder', True),
               job_number))
-        
+
         appointment_id = cursor.lastrowid
-        
+
         # Get the created appointment
         appointment = db.execute('''
             SELECT a.*, t.name as technician_name
@@ -1531,20 +1566,20 @@ def create_appointment():
             LEFT JOIN technicians t ON a.technician_id = t.id
             WHERE a.id = ?
         ''', (appointment_id,)).fetchone()
-        
+
         db.commit()
-        
+
         # Schedule reminders if enabled
         if request.json.get('sms_reminder', True):
             schedule_reminders(dict(appointment))
-        
+
         # Send SMS notification about new appointment
         customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
         if customer:
             try:
                 compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
                 appointment_time = appointment['start_time']
-                message = f"Your {appointment['type']} appointment is scheduled for {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
+                message = f"Your {appointment['type']} appointment (Job #{appointment['job_number']}) is scheduled for {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
                 payload = {
                     "From": FROM_NUMBER,
                     "To": customer['phone'],
@@ -1559,7 +1594,7 @@ def create_appointment():
                 response.raise_for_status()
             except Exception as e:
                 app.logger.error(f"Error sending appointment SMS: {str(e)}")
-        
+
         return jsonify({
             'success': True,
             'appointment': dict(appointment)
@@ -1583,20 +1618,20 @@ def cancel_appointment(appointment_id):
             LEFT JOIN technicians t ON a.technician_id = t.id
             WHERE a.id = ? AND a.customer_id = ?
         ''', (appointment_id, session['customer_id'])).fetchone()
-        
+
         if not appointment:
             return jsonify({'error': 'Appointment not found'}), 404
-        
+
         if appointment['status'] == 'cancelled':
             return jsonify({'error': 'Appointment is already cancelled'}), 400
-        
+
         # Update appointment status
         db.execute('''
             UPDATE appointments 
             SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         ''', (appointment_id,))
-        
+
         # Log the cancellation
         if request.is_json and request.json:
             reason = request.json.get('reason', 'Customer requested cancellation')
@@ -1609,9 +1644,9 @@ def cancel_appointment(appointment_id):
             'job_number': appointment['job_number'],
             'reason': reason
         })))
-        
+
         db.commit()
-        
+
         # Get updated appointment
         updated_appointment = db.execute('''
             SELECT a.*, t.name as technician_name
@@ -1619,14 +1654,14 @@ def cancel_appointment(appointment_id):
             LEFT JOIN technicians t ON a.technician_id = t.id
             WHERE a.id = ?
         ''', (appointment_id,)).fetchone()
-        
+
         # Send SMS notification about cancellation
         customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
         if customer:
             try:
                 compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
                 appointment_time = updated_appointment['start_time']
-                message = f"Your {updated_appointment['type']} appointment for {appointment_time} has been cancelled. Call 1-800-ZEN-CABLE to reschedule."
+                message = f"Your {updated_appointment['type']} appointment (Job #{updated_appointment['job_number']}) for {appointment_time} has been cancelled. Call 1-800-ZEN-CABLE to reschedule."
                 payload = {
                     "From": FROM_NUMBER,
                     "To": customer['phone'],
@@ -1641,7 +1676,7 @@ def cancel_appointment(appointment_id):
                 response.raise_for_status()
             except Exception as e:
                 app.logger.error(f"Error sending cancel appointment SMS: {str(e)}")
-        
+
         return jsonify({
             'success': True,
             'appointment': dict(updated_appointment)
@@ -1740,7 +1775,7 @@ def reschedule_appointment(appointment_id):
             try:
                 compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
                 appointment_time = updated_appointment['start_time']
-                message = f"Your {updated_appointment['type']} appointment has been rescheduled to {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
+                message = f"Your {updated_appointment['type']} appointment (Job #{updated_appointment['job_number']}) has been rescheduled to {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
                 payload = {
                     "From": FROM_NUMBER,
                     "To": customer['phone'],
@@ -1829,6 +1864,11 @@ def test_mfa():
             headers={"Content-Type": "application/json"}
         )
         response.raise_for_status()
+        mfa_data = response.json()
+        mfa_id = mfa_data.get("id")
+        if not mfa_id:
+            return jsonify({'error': 'Failed to generate MFA code'}), 500
+        session['password_reset_mfa_id'] = mfa_id
         print(f"Test MFA code sent to {customer['phone']} via MFA REST endpoint.")
         return jsonify({'success': True})
     except Exception as e:
