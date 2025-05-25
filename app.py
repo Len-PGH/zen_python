@@ -43,6 +43,19 @@ SWAIG_ENDPOINTS_REGISTERED = False
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
+# Add CSRF enable/disable logic
+ENABLE_CSRF = os.getenv('ENABLE_CSRF', 'false').lower() == 'true'
+if ENABLE_CSRF:
+    from flask_wtf import CSRFProtect
+    csrf = CSRFProtect(app)
+else:
+    # Add a dummy csrf_token function when CSRF is disabled
+    @app.context_processor
+    def inject_csrf_token():
+        def dummy_csrf_token():
+            return ""
+        return dict(csrf_token=dummy_csrf_token)
+
 def setup_logging():
     if not os.path.exists('logs'):
         os.mkdir('logs')
@@ -280,15 +293,12 @@ def register_swaig_endpoints():
     def schedule_appointment(customer_id, type, date, time_slot, notes=None, make=None, model=None, mac_address=None, sms_reminder=True, meta_data=None, meta_data_token=None):
         try:
             db = get_db()
-            
             # Validate appointment type
             if type not in ['installation', 'repair', 'upgrade', 'modem_swap']:
                 return "Invalid appointment type.", []
-            
             # Validate time slot
             if time_slot not in ['morning', 'afternoon', 'evening', 'all_day']:
                 return "Invalid time slot.", []
-            
             # Parse date
             try:
                 appointment_date = datetime.strptime(date, '%Y-%m-%d')
@@ -296,17 +306,14 @@ def register_swaig_endpoints():
                     return "Please select a future date.", []
             except ValueError:
                 return "Invalid date format.", []
-            
             # Check for existing appointments
             existing = db.execute('''
                 SELECT * FROM appointments 
                 WHERE customer_id = ? 
                 AND date(start_time) = date(?)
             ''', (customer_id, appointment_date)).fetchone()
-            
             if existing:
                 return f"You already have an appointment on {date}. Would you like to reschedule it?", []
-            
             # Set time slots
             time_slots = {
                 'morning': ('08:00 AM', '11:00 AM'),
@@ -315,7 +322,6 @@ def register_swaig_endpoints():
                 'all_day': ('08:00 AM', '08:00 PM')
             }
             start_time, end_time = time_slots[time_slot]
-            
             # Check if time slot is available
             slot_conflict = db.execute('''
                 SELECT * FROM appointments 
@@ -329,13 +335,10 @@ def register_swaig_endpoints():
                   f"{date} {end_time}", f"{date} {start_time}",
                   f"{date} {end_time}", f"{date} {start_time}",
                   f"{date} {start_time}", f"{date} {end_time}")).fetchone()
-            
             if slot_conflict:
                 return f"The {time_slot} time slot on {date} is already booked. Please choose another time.", []
-            
             # Generate job number
             job_number = generate_job_number()
-            
             # Prepare appointment notes
             appointment_notes = notes or ""
             if type == "modem_swap":
@@ -345,7 +348,6 @@ def register_swaig_endpoints():
                 if not formatted_mac:
                     return "Invalid MAC address format. Please provide a valid MAC address.", []
                 appointment_notes = f"New Modem Details - Make: {make}, Model: {model}, MAC: {formatted_mac}\n{appointment_notes}"
-            
             # Insert appointment
             cursor = db.execute('''
                 INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes, sms_reminder, job_number)
@@ -356,9 +358,7 @@ def register_swaig_endpoints():
                   appointment_notes,
                   sms_reminder,
                   job_number))
-            
             appointment_id = cursor.lastrowid
-            
             # Get the created appointment
             appointment = db.execute('''
                 SELECT a.*, t.name as technician_name
@@ -366,22 +366,37 @@ def register_swaig_endpoints():
                 LEFT JOIN technicians t ON a.technician_id = t.id
                 WHERE a.id = ?
             ''', (appointment_id,)).fetchone()
-            
             # Schedule reminders if enabled
             if sms_reminder:
                 schedule_reminders(dict(appointment))
-            
             db.commit()
-            
-            # Format the response message
+            # Send SMS notification about new appointment
+            customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+            if customer:
+                try:
+                    compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
+                    appointment_time = appointment['start_time']
+                    message = f"Your {appointment['type']} appointment is scheduled for {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
+                    payload = {
+                        "From": FROM_NUMBER,
+                        "To": customer['phone'],
+                        "Body": message
+                    }
+                    response = requests.post(
+                        compat_url,
+                        data=payload,
+                        auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+                        headers={"Content-Type": "application/x-www-form-urlencoded"}
+                    )
+                    response.raise_for_status()
+                except Exception as e:
+                    app.logger.error(f"Error sending appointment SMS: {str(e)}")
             formatted_time = f"{date} {start_time[:5]} - {end_time[:5]}"
             response = f"Your {type} appointment has been scheduled for {formatted_time}. Your job number is {job_number}. "
             if sms_reminder:
                 response += "You will receive a reminder 24 hours before your appointment. "
             response += "Call 1-800-ZEN-CABLE to reschedule."
-            
             return response, []
-            
         except Exception as e:
             app.logger.error(f"SWAIG error in schedule_appointment: {str(e)}")
             return "Error scheduling appointment.", []
@@ -402,30 +417,45 @@ def register_swaig_endpoints():
             }
         ),
         customer_id=SWAIGArgument(type="string", description="The customer's account ID", required=True),
-        appointment_id=SWAIGArgument(type="integer", description="The appointment ID to reschedule", required=True),
+        job_number=SWAIGArgument(type="string", description="The job number for the appointment to reschedule", required=False),
+        appointment_id=SWAIGArgument(type="integer", description="The appointment ID to reschedule (optional, use job number if possible)", required=False),
         date=SWAIGArgument(type="string", description="New date (YYYY-MM-DD)", required=True),
         time_slot=SWAIGArgument(type="string", description="New time slot", enum=["morning", "afternoon", "evening", "all_day"], required=True),
         notes=SWAIGArgument(type="string", description="Notes for the appointment", required=False),
         meta_data=SWAIGArgument(type="object", description="Additional metadata", required=False),
         meta_data_token=SWAIGArgument(type="string", description="Metadata token", required=False)
     )
-    def reschedule_appointment(customer_id, appointment_id, date, time_slot, notes=None, meta_data=None, meta_data_token=None):
+    def reschedule_appointment(customer_id, date, time_slot, notes=None, job_number=None, appointment_id=None, meta_data=None, meta_data_token=None):
         try:
             db = get_db()
+            # Look up appointment by job_number if provided
+            if job_number:
+                appt = db.execute('SELECT * FROM appointments WHERE customer_id = ? AND job_number = ?', (customer_id, job_number)).fetchone()
+                if not appt:
+                    db.close()
+                    return f"No appointment found with job number {job_number}.", []
+                appointment_id = appt['id']
+            elif appointment_id:
+                appt = db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', (appointment_id, customer_id)).fetchone()
+                if not appt:
+                    db.close()
+                    return "Appointment not found.", []
+            else:
+                db.close()
+                return "Please provide the job number for the appointment you want to reschedule.", []
             # Validate time slot
-            if time_slot not in ["morning", "afternoon", "evening", "all_day"]:
-                return "Invalid time slot. Use: morning, afternoon, evening, or all_day.", []
+            if time_slot not in ['morning', 'afternoon', 'evening', 'all_day']:
+                db.close()
+                return "Invalid time slot.", []
             # Parse date
             try:
                 appointment_date = datetime.strptime(date, '%Y-%m-%d')
                 if appointment_date < datetime.now():
+                    db.close()
                     return "Please select a future date.", []
             except ValueError:
-                return "Invalid date format. Use YYYY-MM-DD.", []
-            # Get the appointment
-            appointment = db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', (appointment_id, customer_id)).fetchone()
-            if not appointment:
-                return "Appointment not found.", []
+                db.close()
+                return "Invalid date format.", []
             # Set time slots
             time_slots = {
                 'morning': ('08:00 AM', '11:00 AM'),
@@ -448,7 +478,8 @@ def register_swaig_endpoints():
                   f"{date} {end_time}", f"{date} {start_time}",
                   f"{date} {start_time}", f"{date} {end_time}")).fetchone()
             if slot_conflict:
-                return f"The {time_slot} time slot on {date} is already booked. Please choose another time.", []
+                db.close()
+                return f"The {time_slot} time slot is already booked.", []
             # Update appointment
             db.execute('''
                 UPDATE appointments 
@@ -457,7 +488,7 @@ def register_swaig_endpoints():
             ''', (
                 f"{date} {start_time}",
                 f"{date} {end_time}",
-                notes or appointment['notes'],
+                notes or appt['notes'],
                 appointment_id
             ))
             # Log the reschedule
@@ -467,13 +498,42 @@ def register_swaig_endpoints():
             ''', (appointment_id, json.dumps({
                 'date': date,
                 'time_slot': time_slot,
-                'notes': notes or appointment['notes']
+                'notes': notes or appt['notes'],
+                'job_number': appt['job_number']
             })))
             db.commit()
+            # Get updated appointment
+            updated_appointment = db.execute('''
+                SELECT a.*, t.name as technician_name
+                FROM appointments a
+                LEFT JOIN technicians t ON a.technician_id = t.id
+                WHERE a.id = ?
+            ''', (appointment_id,)).fetchone()
+            # Send SMS notification about reschedule
+            customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+            if customer:
+                try:
+                    compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
+                    appointment_time = updated_appointment['start_time']
+                    message = f"Your {updated_appointment['type']} appointment has been rescheduled to {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
+                    payload = {
+                        "From": FROM_NUMBER,
+                        "To": customer['phone'],
+                        "Body": message
+                    }
+                    response = requests.post(
+                        compat_url,
+                        data=payload,
+                        auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+                        headers={"Content-Type": "application/x-www-form-urlencoded"}
+                    )
+                    response.raise_for_status()
+                except Exception as e:
+                    app.logger.error(f"Error sending reschedule appointment SMS: {str(e)}")
             db.close()
-            return f"Appointment {appointment_id} rescheduled to {date} ({time_slot}).", []
+            return f"Your appointment has been rescheduled to {date} {start_time} - {end_time}.", []
         except Exception as e:
-            app.logger.error(f"Error in reschedule_appointment: {str(e)}")
+            app.logger.error(f"SWAIG error in reschedule_appointment: {str(e)}")
             return "Error rescheduling appointment.", []
 
     @swaig.endpoint(
@@ -489,37 +549,79 @@ def register_swaig_endpoints():
             }
         ),
         customer_id=SWAIGArgument(type="string", description="The customer's account ID", required=True),
-        appointment_id=SWAIGArgument(type="integer", description="The appointment ID to cancel", required=True),
+        job_number=SWAIGArgument(type="string", description="The job number for the appointment to cancel", required=False),
+        appointment_id=SWAIGArgument(type="integer", description="The appointment ID to cancel (optional, use job number if possible)", required=False),
         meta_data=SWAIGArgument(type="object", description="Additional metadata", required=False),
         meta_data_token=SWAIGArgument(type="string", description="Metadata token", required=False)
     )
-    def cancel_appointment(customer_id, appointment_id, meta_data=None, meta_data_token=None):
+    def cancel_appointment(customer_id, job_number=None, appointment_id=None, meta_data=None, meta_data_token=None):
         try:
             db = get_db()
-            appointment = db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', (appointment_id, customer_id)).fetchone()
-            if not appointment or appointment['status'] != 'scheduled':
-                return "Appointment not found or cannot be cancelled.", []
+            # Look up appointment by job_number if provided
+            if job_number:
+                appt = db.execute('SELECT * FROM appointments WHERE customer_id = ? AND job_number = ?', (customer_id, job_number)).fetchone()
+                if not appt:
+                    db.close()
+                    return f"No appointment found with job number {job_number}.", []
+                appointment_id = appt['id']
+            elif appointment_id:
+                appt = db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', (appointment_id, customer_id)).fetchone()
+                if not appt:
+                    db.close()
+                    return "Appointment not found.", []
+            else:
+                db.close()
+                return "Please provide the job number for the appointment you want to cancel.", []
+            if appt['status'] == 'cancelled':
+                db.close()
+                return "Appointment is already cancelled.", []
+            # Update appointment status
             db.execute('''
                 UPDATE appointments 
                 SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             ''', (appointment_id,))
-            if request.is_json and request.json:
-                reason = request.json.get('reason', 'Customer requested cancellation')
-            else:
-                reason = 'Customer requested cancellation'
+            # Log the cancellation
             db.execute('''
                 INSERT INTO appointment_history (appointment_id, action, details, created_at)
                 VALUES (?, 'cancelled', ?, CURRENT_TIMESTAMP)
             ''', (appointment_id, json.dumps({
-                'job_number': appointment['job_number'],
-                'reason': reason
+                'job_number': appt['job_number'],
+                'reason': 'Customer requested cancellation'
             })))
             db.commit()
+            # Get updated appointment
+            updated_appointment = db.execute('''
+                SELECT a.*, t.name as technician_name
+                FROM appointments a
+                LEFT JOIN technicians t ON a.technician_id = t.id
+                WHERE a.id = ?
+            ''', (appointment_id,)).fetchone()
+            # Send SMS notification about cancellation
+            customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
+            if customer:
+                try:
+                    compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
+                    appointment_time = updated_appointment['start_time']
+                    message = f"Your {updated_appointment['type']} appointment for {appointment_time} has been cancelled. Call 1-800-ZEN-CABLE to reschedule."
+                    payload = {
+                        "From": FROM_NUMBER,
+                        "To": customer['phone'],
+                        "Body": message
+                    }
+                    response = requests.post(
+                        compat_url,
+                        data=payload,
+                        auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+                        headers={"Content-Type": "application/x-www-form-urlencoded"}
+                    )
+                    response.raise_for_status()
+                except Exception as e:
+                    app.logger.error(f"Error sending cancel appointment SMS: {str(e)}")
             db.close()
-            return f"Appointment {appointment_id} cancelled.", []
+            return "Your appointment has been cancelled.", []
         except Exception as e:
-            app.logger.error(f"Error in cancel_appointment: {str(e)}")
+            app.logger.error(f"SWAIG error in cancel_appointment: {str(e)}")
             return "Error cancelling appointment.", []
 
     def format_mac_address(mac_address):
@@ -598,6 +700,45 @@ def register_swaig_endpoints():
         except Exception as e:
             app.logger.error(f"Error in swap_modem: {str(e)}")
             return "Error updating modem information.", []
+
+    @swaig.endpoint(
+        "Check for existing appointments for the customer",
+        SWAIGFunctionProperties(
+            active=True,
+            wait_for_fillers=True,
+            fillers={
+                "default": [
+                    "Checking your upcoming appointments...",
+                    "Retrieving your scheduled appointments...",
+                    "One moment while I look up your appointments..."
+                ]
+            }
+        ),
+        customer_id=SWAIGArgument(type="string", description="The customer's account ID", required=True),
+        meta_data=SWAIGArgument(type="object", description="Additional metadata", required=False),
+        meta_data_token=SWAIGArgument(type="string", description="Metadata token", required=False)
+    )
+    def check_existing_appointments(customer_id, meta_data=None, meta_data_token=None):
+        try:
+            db = get_db()
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            appointments = db.execute('''
+                SELECT id, type, status, start_time, end_time, notes
+                FROM appointments
+                WHERE customer_id = ? AND start_time >= ?
+                ORDER BY start_time ASC
+            ''', (customer_id, now)).fetchall()
+            db.close()
+            if not appointments:
+                return "You have no upcoming appointments.", []
+            appt_list = []
+            for appt in appointments:
+                appt_list.append(f"{appt['type'].capitalize()} on {appt['start_time']} (Status: {appt['status'].capitalize()})")
+            response = "You have the following upcoming appointments: " + "; ".join(appt_list)
+            return response, []
+        except Exception as e:
+            app.logger.error(f"SWAIG error in check_existing_appointments: {str(e)}")
+            return "Error checking appointments.", []
 
 # Add template filters
 @app.template_filter('status_color')
@@ -1293,67 +1434,6 @@ def get_appointment(appointment_id):
         return jsonify(appt_dict)
     return jsonify({'error': 'Appointment not found'}), 404
 
-@app.route('/api/appointments/<int:appointment_id>/cancel', methods=['POST'])
-@login_required
-def cancel_appointment(appointment_id):
-    db = get_db()
-    try:
-        # Get the appointment
-        appointment = db.execute('''
-            SELECT a.*, t.name as technician_name
-            FROM appointments a
-            LEFT JOIN technicians t ON a.technician_id = t.id
-            WHERE a.id = ? AND a.customer_id = ?
-        ''', (appointment_id, session['customer_id'])).fetchone()
-        
-        if not appointment:
-            return jsonify({'error': 'Appointment not found'}), 404
-        
-        if appointment['status'] == 'cancelled':
-            return jsonify({'error': 'Appointment is already cancelled'}), 400
-        
-        # Update appointment status
-        db.execute('''
-            UPDATE appointments 
-            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        ''', (appointment_id,))
-        
-        # Log the cancellation
-        if request.is_json and request.json:
-            reason = request.json.get('reason', 'Customer requested cancellation')
-        else:
-            reason = 'Customer requested cancellation'
-        db.execute('''
-            INSERT INTO appointment_history (appointment_id, action, details, created_at)
-            VALUES (?, 'cancelled', ?, CURRENT_TIMESTAMP)
-        ''', (appointment_id, json.dumps({
-            'job_number': appointment['job_number'],
-            'reason': reason
-        })))
-        
-        db.commit()
-        
-        # Get updated appointment
-        updated_appointment = db.execute('''
-            SELECT a.*, t.name as technician_name
-            FROM appointments a
-            LEFT JOIN technicians t ON a.technician_id = t.id
-            WHERE a.id = ?
-        ''', (appointment_id,)).fetchone()
-        
-        return jsonify({
-            'success': True,
-            'appointment': dict(updated_appointment)
-        })
-        
-    except Exception as e:
-        db.rollback()
-        app.logger.error(f"Error cancelling appointment: {str(e)}")
-        return jsonify({'error': 'Failed to cancel appointment'}), 500
-    finally:
-        db.close()
-
 def generate_job_number():
     """Generate a unique 5-digit job number."""
     db = get_db()
@@ -1370,11 +1450,9 @@ def generate_job_number():
 def create_appointment():
     if not request.json:
         return jsonify({'error': 'No data provided'}), 400
-    
     required_fields = ['type', 'date', 'time_slot']
     if not all(field in request.json for field in required_fields):
         return jsonify({'error': 'Missing required fields'}), 400
-    
     db = get_db()
     try:
         # Validate appointment type
@@ -1460,15 +1538,118 @@ def create_appointment():
         if request.json.get('sms_reminder', True):
             schedule_reminders(dict(appointment))
         
+        # Send SMS notification about new appointment
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
+        if customer:
+            try:
+                compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
+                appointment_time = appointment['start_time']
+                message = f"Your {appointment['type']} appointment is scheduled for {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
+                payload = {
+                    "From": FROM_NUMBER,
+                    "To": customer['phone'],
+                    "Body": message
+                }
+                response = requests.post(
+                    compat_url,
+                    data=payload,
+                    auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                response.raise_for_status()
+            except Exception as e:
+                app.logger.error(f"Error sending appointment SMS: {str(e)}")
+        
         return jsonify({
             'success': True,
             'appointment': dict(appointment)
         })
-        
     except Exception as e:
         db.rollback()
         app.logger.error(f"Error creating appointment: {str(e)}")
         return jsonify({'error': 'Failed to create appointment'}), 500
+    finally:
+        db.close()
+
+@app.route('/api/appointments/<int:appointment_id>/cancel', methods=['POST'])
+@login_required
+def cancel_appointment(appointment_id):
+    db = get_db()
+    try:
+        # Get the appointment
+        appointment = db.execute('''
+            SELECT a.*, t.name as technician_name
+            FROM appointments a
+            LEFT JOIN technicians t ON a.technician_id = t.id
+            WHERE a.id = ? AND a.customer_id = ?
+        ''', (appointment_id, session['customer_id'])).fetchone()
+        
+        if not appointment:
+            return jsonify({'error': 'Appointment not found'}), 404
+        
+        if appointment['status'] == 'cancelled':
+            return jsonify({'error': 'Appointment is already cancelled'}), 400
+        
+        # Update appointment status
+        db.execute('''
+            UPDATE appointments 
+            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (appointment_id,))
+        
+        # Log the cancellation
+        if request.is_json and request.json:
+            reason = request.json.get('reason', 'Customer requested cancellation')
+        else:
+            reason = 'Customer requested cancellation'
+        db.execute('''
+            INSERT INTO appointment_history (appointment_id, action, details, created_at)
+            VALUES (?, 'cancelled', ?, CURRENT_TIMESTAMP)
+        ''', (appointment_id, json.dumps({
+            'job_number': appointment['job_number'],
+            'reason': reason
+        })))
+        
+        db.commit()
+        
+        # Get updated appointment
+        updated_appointment = db.execute('''
+            SELECT a.*, t.name as technician_name
+            FROM appointments a
+            LEFT JOIN technicians t ON a.technician_id = t.id
+            WHERE a.id = ?
+        ''', (appointment_id,)).fetchone()
+        
+        # Send SMS notification about cancellation
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
+        if customer:
+            try:
+                compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
+                appointment_time = updated_appointment['start_time']
+                message = f"Your {updated_appointment['type']} appointment for {appointment_time} has been cancelled. Call 1-800-ZEN-CABLE to reschedule."
+                payload = {
+                    "From": FROM_NUMBER,
+                    "To": customer['phone'],
+                    "Body": message
+                }
+                response = requests.post(
+                    compat_url,
+                    data=payload,
+                    auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                response.raise_for_status()
+            except Exception as e:
+                app.logger.error(f"Error sending cancel appointment SMS: {str(e)}")
+        
+        return jsonify({
+            'success': True,
+            'appointment': dict(updated_appointment)
+        })
+    except Exception as e:
+        db.rollback()
+        app.logger.error(f"Error cancelling appointment: {str(e)}")
+        return jsonify({'error': 'Failed to cancel appointment'}), 500
     finally:
         db.close()
 
@@ -1553,6 +1734,27 @@ def reschedule_appointment(appointment_id):
             LEFT JOIN technicians t ON a.technician_id = t.id
             WHERE a.id = ?
         ''', (appointment_id,)).fetchone()
+        # Send SMS notification about reschedule
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
+        if customer:
+            try:
+                compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
+                appointment_time = updated_appointment['start_time']
+                message = f"Your {updated_appointment['type']} appointment has been rescheduled to {appointment_time}. Call 1-800-ZEN-CABLE to reschedule."
+                payload = {
+                    "From": FROM_NUMBER,
+                    "To": customer['phone'],
+                    "Body": message
+                }
+                response = requests.post(
+                    compat_url,
+                    data=payload,
+                    auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                response.raise_for_status()
+            except Exception as e:
+                app.logger.error(f"Error sending reschedule appointment SMS: {str(e)}")
         return jsonify({
             'success': True,
             'appointment': dict(updated_appointment)

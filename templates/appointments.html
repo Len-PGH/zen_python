@@ -192,6 +192,7 @@
         </div>
         <div class="modal-body">
           <form id="appointmentForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
               <label class="form-label">Appointment Type</label>
               <select class="form-select bg-dark text-light" name="type" required>
@@ -259,6 +260,7 @@
         </div>
         <div class="modal-body">
           <form id="rescheduleForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" id="rescheduleAppointmentId" name="appointment_id">
             <div class="mb-3">
               <label class="form-label">Date</label>
@@ -287,6 +289,10 @@
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.10/main.min.js"></script>
   <script>
+    const csrfToken = "{{ csrf_token() }}";
+    const internalApiKey = "{{ INTERNAL_API_KEY }}";
+    let appointmentSubmitting = false;
+
     function showAppointmentModal() {
       const modal = new bootstrap.Modal(document.getElementById('appointmentModal'));
       modal.show();
@@ -365,7 +371,9 @@
         fetch(`/api/appointments/${id}/cancel`, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrfToken,
+            'X-Internal-API-Key': internalApiKey
           },
           body: '{}' // Always send an empty JSON object
         })
@@ -387,6 +395,8 @@
     // Handle appointment form submission
     document.getElementById('appointmentForm').addEventListener('submit', function(e) {
       e.preventDefault();
+      if (appointmentSubmitting) return;
+      appointmentSubmitting = true;
       const formData = new FormData(this);
       const data = {
         type: formData.get('type'),
@@ -399,12 +409,20 @@
       fetch('/api/appointments', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'X-CSRFToken': csrfToken,
+          'X-Internal-API-Key': internalApiKey
         },
         body: JSON.stringify(data)
       })
-      .then(response => response.json())
+      .then(response => {
+        if (!response.ok) {
+          return response.text().then(text => { throw new Error(text); });
+        }
+        return response.json();
+      })
       .then(data => {
+        appointmentSubmitting = false;
         if (data.success) {
           location.reload();
         } else {
@@ -412,8 +430,9 @@
         }
       })
       .catch(error => {
+        appointmentSubmitting = false;
         console.error('Error:', error);
-        alert('Failed to schedule appointment');
+        alert('Failed to schedule appointment: ' + error.message);
       });
     });
 
@@ -427,10 +446,19 @@
       };
       fetch(`/api/appointments/${id}/reschedule`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': csrfToken,
+          'X-Internal-API-Key': internalApiKey
+        },
         body: JSON.stringify(data)
       })
-      .then(response => response.json())
+      .then(response => {
+        if (!response.ok) {
+          return response.text().then(text => { throw new Error(text); });
+        }
+        return response.json();
+      })
       .then(data => {
         if (data.success) {
           location.reload();
@@ -439,7 +467,7 @@
         }
       })
       .catch(error => {
-        alert('Failed to reschedule appointment');
+        alert('Failed to reschedule appointment: ' + error.message);
       });
     });
 
