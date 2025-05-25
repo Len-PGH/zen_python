@@ -16,6 +16,35 @@ body {
     border-bottom: 1px solid #404040;
 }
 
+/* Table styles */
+.table {
+    color: #ffffff !important;
+}
+
+.table-dark {
+    background-color: #2d2d2d !important;
+}
+
+.table-dark td, 
+.table-dark th {
+    border-color: #404040 !important;
+    color: #ffffff !important;
+}
+
+.table-dark thead th {
+    background-color: #1a1a1a !important;
+    color: #ffffff !important;
+    border-bottom: 2px solid #404040 !important;
+}
+
+.table-dark tbody tr {
+    background-color: #2d2d2d !important;
+}
+
+.table-dark tbody tr:hover {
+    background-color: #3d3d3d !important;
+}
+
 /* Status indicators */
 .status-indicator {
     width: 12px;

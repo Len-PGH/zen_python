@@ -1,6 +1,7 @@
 import sqlite3
 import hashlib
 import secrets
+import os
 
 def hash_password(password: str):
     """Generate a salt and SHA-256 hash for the given password."""
@@ -9,6 +10,11 @@ def hash_password(password: str):
     return pw_hash, salt
 
 def init_db():
+    # Remove existing database if it exists
+    if os.path.exists('zen_cable.db'):
+        os.remove('zen_cable.db')
+        print("Removed existing database")
+
     db = sqlite3.connect('zen_cable.db')
     db.row_factory = sqlite3.Row
 
@@ -22,7 +28,9 @@ def init_db():
             address TEXT,
             password_hash TEXT NOT NULL,
             password_salt TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            first_name TEXT,
+            last_name TEXT
         )
     ''')
 
@@ -56,9 +64,11 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_id INTEGER NOT NULL,
             mac_address TEXT NOT NULL,
+            make TEXT,
             model TEXT,
             status TEXT DEFAULT 'online',
             last_seen TIMESTAMP,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (customer_id) REFERENCES customers (id)
         )
     ''')
@@ -76,14 +86,25 @@ def init_db():
     ''')
 
     db.execute('''
+        CREATE TABLE IF NOT EXISTS payment_methods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            details TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers (id)
+        )
+    ''')
+
+    db.execute('''
         CREATE TABLE IF NOT EXISTS payments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_id INTEGER NOT NULL,
             amount DECIMAL(10,2) NOT NULL,
             payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             payment_method TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            transaction_id TEXT UNIQUE,
+            status TEXT NOT NULL,
+            transaction_id TEXT NOT NULL,
             FOREIGN KEY (customer_id) REFERENCES customers (id)
         )
     ''')
@@ -113,6 +134,8 @@ def init_db():
             location TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            sms_reminder BOOLEAN DEFAULT 1,
+            job_number TEXT UNIQUE,
             FOREIGN KEY (customer_id) REFERENCES customers (id),
             FOREIGN KEY (technician_id) REFERENCES technicians (id)
         )
@@ -158,8 +181,19 @@ def init_db():
         CREATE TABLE IF NOT EXISTS password_resets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_id INTEGER NOT NULL,
-            token TEXT UNIQUE NOT NULL,
+            token TEXT NOT NULL,
             expiry TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (customer_id) REFERENCES customers (id)
+        )
+    ''')
+
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS modem_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            details TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (customer_id) REFERENCES customers (id)
         )

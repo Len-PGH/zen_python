@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, session, redirect, url_for, flash, Response
+from flask import Flask, render_template, jsonify, request, session, redirect, url_for, flash, Response, g
 import sqlite3
 from datetime import datetime, timedelta
 import os
@@ -16,27 +16,9 @@ from signalwire.rest import Client as SignalWireClient
 import schedule
 from signalwire.voice_response import VoiceResponse
 import sys
-
-# Configure logging
-def setup_logging():
-    if not os.path.exists('logs'):
-        os.makedirs('logs')
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            RotatingFileHandler('logs/signalwire.log', maxBytes=10485760, backupCount=5),
-            logging.StreamHandler()
-        ]
-    )
-    logger = logging.getLogger('signalwire')
-    logger.setLevel(logging.INFO)
-    return logger
-
-logger = setup_logging()
-
-app = Flask(__name__)
-app.secret_key = os.urandom(24)
+from mfa_util import SignalWireMFA, is_valid_uuid, validate_phone
+import requests
+import random
 
 # Global SignalWire configuration variables
 SIGNALWIRE_PROJECT_ID = None
@@ -44,11 +26,37 @@ SIGNALWIRE_TOKEN = None
 SIGNALWIRE_SPACE = None
 HTTP_USERNAME = None
 HTTP_PASSWORD = None
+FROM_NUMBER = None
 signalwire_client = None
 swaig = None
 
+# Global variables for MFA
+LAST_MFA_ID = None
+VERIFIED_CUSTOMER_DATA = {}
+
+# Initialize MFA utility
+mfa_util = None
+
+# Add a global flag to track SWAIG endpoint registration
+SWAIG_ENDPOINTS_REGISTERED = False
+
+app = Flask(__name__)
+app.secret_key = os.urandom(24)
+
+def setup_logging():
+    if not os.path.exists('logs'):
+        os.mkdir('logs')
+    file_handler = RotatingFileHandler('logs/zen_cable.log', maxBytes=10240, backupCount=10)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    file_handler.setLevel(logging.INFO)
+    app.logger.addHandler(file_handler)
+    app.logger.setLevel(logging.INFO)
+    app.logger.info('Zen Cable startup')
+
 def initialize_signalwire():
-    global signalwire_client, swaig, SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, SIGNALWIRE_SPACE, HTTP_USERNAME, HTTP_PASSWORD
+    global signalwire_client, swaig, SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, SIGNALWIRE_SPACE, HTTP_USERNAME, HTTP_PASSWORD, FROM_NUMBER, mfa_util
     if os.path.exists('.env'):
         load_dotenv()
         SIGNALWIRE_PROJECT_ID = os.getenv('SIGNALWIRE_PROJECT_ID')
@@ -56,27 +64,36 @@ def initialize_signalwire():
         SIGNALWIRE_SPACE = os.getenv('SIGNALWIRE_SPACE')
         HTTP_USERNAME = os.getenv('HTTP_USERNAME')
         HTTP_PASSWORD = os.getenv('HTTP_PASSWORD')
-        if all([SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, SIGNALWIRE_SPACE, HTTP_USERNAME, HTTP_PASSWORD]):
+        FROM_NUMBER = os.getenv('FROM_NUMBER')
+        if all([SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, SIGNALWIRE_SPACE, HTTP_USERNAME, HTTP_PASSWORD, FROM_NUMBER]):
             try:
                 signalwire_client = SignalWireClient(
                     SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, signalwire_space_url=SIGNALWIRE_SPACE
                 )
                 swaig = SWAIG(app, auth=(HTTP_USERNAME, HTTP_PASSWORD))
-                logger.info("SignalWire client and SWAIG initialized successfully")
+                mfa_util = SignalWireMFA(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN, SIGNALWIRE_SPACE, FROM_NUMBER)
+                app.logger.info("SignalWire client, SWAIG, and MFA utility initialized successfully")
+                # Register SWAIG endpoints immediately after initialization
+                register_swaig_endpoints()
             except Exception as e:
-                logger.error(f"Failed to initialize SignalWire: {str(e)}")
+                app.logger.error(f"Failed to initialize SignalWire: {str(e)}")
                 signalwire_client = None
                 swaig = None
+                mfa_util = None
         else:
-            logger.warning("Missing environment variables; SignalWire not initialized")
+            app.logger.warning("Missing environment variables; SignalWire not initialized")
     else:
-        logger.info("No .env file found; SignalWire not initialized")
+        app.logger.info("No .env file found; SignalWire not initialized")
 
 def register_swaig_endpoints():
-    global swaig
+    global swaig, SWAIG_ENDPOINTS_REGISTERED
     if not swaig:
-        logger.error("Cannot register SWAIG endpoints: SWAIG not initialized")
+        app.logger.error("Cannot register SWAIG endpoints: SWAIG not initialized")
         return
+    if SWAIG_ENDPOINTS_REGISTERED:
+        app.logger.info("SWAIG endpoints already registered; skipping.")
+        return
+    SWAIG_ENDPOINTS_REGISTERED = True
 
     @swaig.endpoint(
         "Check the current balance and due date for the customer's account",
@@ -111,7 +128,7 @@ def register_swaig_endpoints():
                 return f"Your current balance is ${billing['amount']:.2f}, due on {billing['due_date']}.", []
             return "No billing information found for your account.", []
         except Exception as e:
-            logger.error(f"Error in check_balance: {str(e)}")
+            app.logger.error(f"Error in check_balance: {str(e)}")
             return "Error checking balance. Please try again later.", []
 
     @swaig.endpoint(
@@ -156,7 +173,7 @@ def register_swaig_endpoints():
             db.close()
             return f"Payment of ${amount:.2f} initiated. Confirmation text incoming.", []
         except Exception as e:
-            logger.error(f"Error in make_payment: {str(e)}")
+            app.logger.error(f"Error in make_payment: {str(e)}")
             return "Error processing payment. Please try again.", []
 
     @swaig.endpoint(
@@ -188,7 +205,7 @@ def register_swaig_endpoints():
                 return f"Your modem is {modem['status']}. MAC: {modem['mac_address']}.", []
             return "No modem information found for your account.", []
         except Exception as e:
-            logger.error(f"Error in check_modem_status: {str(e)}")
+            app.logger.error(f"Error in check_modem_status: {str(e)}")
             return "Error checking modem status.", []
 
     @swaig.endpoint(
@@ -214,16 +231,25 @@ def register_swaig_endpoints():
             customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
             if not customer:
                 return "I couldn't find your account. Please verify your account number.", []
+            
             modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
             if not modem:
                 return "No modem information found for your account.", []
+            
+            # Update modem status to rebooting
+            db.execute('UPDATE modems SET status = "rebooting", last_seen = CURRENT_TIMESTAMP WHERE customer_id = ?', 
+                      (customer_id,))
+            db.commit()
+            
+            # Start the reboot simulation in a background thread
             thread = threading.Thread(target=simulate_modem_reboot, args=(customer_id,))
             thread.daemon = True
             thread.start()
+            
             db.close()
             return "Modem reboot initiated. This will take about 30 seconds.", []
         except Exception as e:
-            logger.error(f"Error in reboot_modem: {str(e)}")
+            app.logger.error(f"Error in reboot_modem: {str(e)}")
             return "Error rebooting modem.", []
 
     @swaig.endpoint(
@@ -242,94 +268,350 @@ def register_swaig_endpoints():
         customer_id=SWAIGArgument(type="string", description="The customer's account ID", required=True),
         type=SWAIGArgument(type="string", description="Type of appointment", enum=["installation", "repair", "upgrade", "modem_swap"], required=True),
         date=SWAIGArgument(type="string", description="Preferred date (YYYY-MM-DD)", required=True),
+        time_slot=SWAIGArgument(type="string", description="Preferred time slot", enum=["morning", "afternoon", "evening", "all_day"], required=True),
+        notes=SWAIGArgument(type="string", description="Notes for the appointment", required=False),
+        make=SWAIGArgument(type="string", description="The make of the new modem (required for modem_swap)", required=False),
+        model=SWAIGArgument(type="string", description="The model of the new modem (required for modem_swap)", required=False),
+        mac_address=SWAIGArgument(type="string", description="The MAC address of the new modem (required for modem_swap)", required=False),
+        sms_reminder=SWAIGArgument(type="boolean", description="Whether to send SMS reminders", required=False),
         meta_data=SWAIGArgument(type="object", description="Additional metadata", required=False),
         meta_data_token=SWAIGArgument(type="string", description="Metadata token", required=False)
     )
-    def schedule_appointment(customer_id, type, date, meta_data=None, meta_data_token=None):
+    def schedule_appointment(customer_id, type, date, time_slot, notes=None, make=None, model=None, mac_address=None, sms_reminder=True, meta_data=None, meta_data_token=None):
         try:
             db = get_db()
-            customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
-            if not customer:
-                return "I couldn't find your account. Please verify your account number.", []
-            if type not in ["installation", "repair", "upgrade", "modem_swap"]:
-                return "Invalid appointment type. Use: installation, repair, upgrade, or modem_swap.", []
-            appointment_date = datetime.strptime(date, '%Y-%m-%d')
-            if appointment_date < datetime.now():
-                return "Please select a future date.", []
+            
+            # Validate appointment type
+            if type not in ['installation', 'repair', 'upgrade', 'modem_swap']:
+                return "Invalid appointment type.", []
+            
+            # Validate time slot
+            if time_slot not in ['morning', 'afternoon', 'evening', 'all_day']:
+                return "Invalid time slot.", []
+            
+            # Parse date
+            try:
+                appointment_date = datetime.strptime(date, '%Y-%m-%d')
+                if appointment_date < datetime.now():
+                    return "Please select a future date.", []
+            except ValueError:
+                return "Invalid date format.", []
+            
+            # Check for existing appointments
             existing = db.execute('''
                 SELECT * FROM appointments 
                 WHERE customer_id = ? 
                 AND date(start_time) = date(?)
             ''', (customer_id, appointment_date)).fetchone()
+            
             if existing:
-                return f"You already have an appointment on {date}.", []
-            db.execute('''
-                INSERT INTO appointments (customer_id, type, status, start_time, end_time)
-                VALUES (?, ?, 'scheduled', ?, ?)
-            ''', (customer_id, type, appointment_date.strftime('%Y-%m-%d 09:00:00'), appointment_date.strftime('%Y-%m-%d 11:00:00')))
+                return f"You already have an appointment on {date}. Would you like to reschedule it?", []
+            
+            # Set time slots
+            time_slots = {
+                'morning': ('08:00 AM', '11:00 AM'),
+                'afternoon': ('02:00 PM', '04:00 PM'),
+                'evening': ('06:00 PM', '08:00 PM'),
+                'all_day': ('08:00 AM', '08:00 PM')
+            }
+            start_time, end_time = time_slots[time_slot]
+            
+            # Check if time slot is available
+            slot_conflict = db.execute('''
+                SELECT * FROM appointments 
+                WHERE date(start_time) = date(?)
+                AND (
+                    (start_time <= ? AND end_time > ?) OR
+                    (start_time < ? AND end_time >= ?) OR
+                    (start_time >= ? AND end_time <= ?)
+                )
+            ''', (appointment_date, 
+                  f"{date} {end_time}", f"{date} {start_time}",
+                  f"{date} {end_time}", f"{date} {start_time}",
+                  f"{date} {start_time}", f"{date} {end_time}")).fetchone()
+            
+            if slot_conflict:
+                return f"The {time_slot} time slot on {date} is already booked. Please choose another time.", []
+            
+            # Generate job number
+            job_number = generate_job_number()
+            
+            # Prepare appointment notes
+            appointment_notes = notes or ""
+            if type == "modem_swap":
+                if not all([make, model, mac_address]):
+                    return "For modem swap appointments, please provide the make, model, and MAC address of the new modem.", []
+                formatted_mac = format_mac_address(mac_address)
+                if not formatted_mac:
+                    return "Invalid MAC address format. Please provide a valid MAC address.", []
+                appointment_notes = f"New Modem Details - Make: {make}, Model: {model}, MAC: {formatted_mac}\n{appointment_notes}"
+            
+            # Insert appointment
+            cursor = db.execute('''
+                INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes, sms_reminder, job_number)
+                VALUES (?, ?, 'scheduled', ?, ?, ?, ?, ?)
+            ''', (customer_id, type, 
+                  f"{date} {start_time}", 
+                  f"{date} {end_time}",
+                  appointment_notes,
+                  sms_reminder,
+                  job_number))
+            
+            appointment_id = cursor.lastrowid
+            
+            # Get the created appointment
+            appointment = db.execute('''
+                SELECT a.*, t.name as technician_name
+                FROM appointments a
+                LEFT JOIN technicians t ON a.technician_id = t.id
+                WHERE a.id = ?
+            ''', (appointment_id,)).fetchone()
+            
+            # Schedule reminders if enabled
+            if sms_reminder:
+                schedule_reminders(dict(appointment))
+            
             db.commit()
-            db.close()
-            return f"{type} appointment scheduled for {date}. Confirmation text incoming.", []
-        except ValueError:
-            return "Invalid date format. Use YYYY-MM-DD.", []
+            
+            # Format the response message
+            formatted_time = f"{date} {start_time[:5]} - {end_time[:5]}"
+            response = f"Your {type} appointment has been scheduled for {formatted_time}. Your job number is {job_number}. "
+            if sms_reminder:
+                response += "You will receive a reminder 24 hours before your appointment. "
+            response += "Call 1-800-ZEN-CABLE to reschedule."
+            
+            return response, []
+            
         except Exception as e:
-            logger.error(f"Error in schedule_appointment: {str(e)}")
+            app.logger.error(f"SWAIG error in schedule_appointment: {str(e)}")
             return "Error scheduling appointment.", []
+        finally:
+            db.close()
 
     @swaig.endpoint(
-        "Schedule a modem swap appointment",
+        "Reschedule an existing appointment",
         SWAIGFunctionProperties(
             active=True,
             wait_for_fillers=True,
             fillers={
                 "default": [
-                    "Scheduling modem swap...",
-                    "Arranging your modem replacement...",
-                    "Please wait..."
+                    "Rescheduling your appointment...",
+                    "Checking availability...",
+                    "Updating your appointment..."
                 ]
             }
         ),
         customer_id=SWAIGArgument(type="string", description="The customer's account ID", required=True),
-        date=SWAIGArgument(type="string", description="Preferred date (YYYY-MM-DD)", required=True),
+        appointment_id=SWAIGArgument(type="integer", description="The appointment ID to reschedule", required=True),
+        date=SWAIGArgument(type="string", description="New date (YYYY-MM-DD)", required=True),
+        time_slot=SWAIGArgument(type="string", description="New time slot", enum=["morning", "afternoon", "evening", "all_day"], required=True),
+        notes=SWAIGArgument(type="string", description="Notes for the appointment", required=False),
         meta_data=SWAIGArgument(type="object", description="Additional metadata", required=False),
         meta_data_token=SWAIGArgument(type="string", description="Metadata token", required=False)
     )
-    def swap_modem(customer_id, date, meta_data=None, meta_data_token=None):
+    def reschedule_appointment(customer_id, appointment_id, date, time_slot, notes=None, meta_data=None, meta_data_token=None):
+        try:
+            db = get_db()
+            # Validate time slot
+            if time_slot not in ["morning", "afternoon", "evening", "all_day"]:
+                return "Invalid time slot. Use: morning, afternoon, evening, or all_day.", []
+            # Parse date
+            try:
+                appointment_date = datetime.strptime(date, '%Y-%m-%d')
+                if appointment_date < datetime.now():
+                    return "Please select a future date.", []
+            except ValueError:
+                return "Invalid date format. Use YYYY-MM-DD.", []
+            # Get the appointment
+            appointment = db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', (appointment_id, customer_id)).fetchone()
+            if not appointment:
+                return "Appointment not found.", []
+            # Set time slots
+            time_slots = {
+                'morning': ('08:00 AM', '11:00 AM'),
+                'afternoon': ('02:00 PM', '04:00 PM'),
+                'evening': ('06:00 PM', '08:00 PM'),
+                'all_day': ('08:00 AM', '08:00 PM')
+            }
+            start_time, end_time = time_slots[time_slot]
+            # Check for slot conflict
+            slot_conflict = db.execute('''
+                SELECT * FROM appointments 
+                WHERE customer_id = ? AND id != ? AND date(start_time) = date(?)
+                AND (
+                    (start_time <= ? AND end_time > ?) OR
+                    (start_time < ? AND end_time >= ?) OR
+                    (start_time >= ? AND end_time <= ?)
+                )
+            ''', (customer_id, appointment_id, appointment_date,
+                  f"{date} {end_time}", f"{date} {start_time}",
+                  f"{date} {end_time}", f"{date} {start_time}",
+                  f"{date} {start_time}", f"{date} {end_time}")).fetchone()
+            if slot_conflict:
+                return f"The {time_slot} time slot on {date} is already booked. Please choose another time.", []
+            # Update appointment
+            db.execute('''
+                UPDATE appointments 
+                SET start_time = ?, end_time = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (
+                f"{date} {start_time}",
+                f"{date} {end_time}",
+                notes or appointment['notes'],
+                appointment_id
+            ))
+            # Log the reschedule
+            db.execute('''
+                INSERT INTO appointment_history (appointment_id, action, details, created_at)
+                VALUES (?, 'rescheduled', ?, CURRENT_TIMESTAMP)
+            ''', (appointment_id, json.dumps({
+                'date': date,
+                'time_slot': time_slot,
+                'notes': notes or appointment['notes']
+            })))
+            db.commit()
+            db.close()
+            return f"Appointment {appointment_id} rescheduled to {date} ({time_slot}).", []
+        except Exception as e:
+            app.logger.error(f"Error in reschedule_appointment: {str(e)}")
+            return "Error rescheduling appointment.", []
+
+    @swaig.endpoint(
+        "Cancel an appointment",
+        SWAIGFunctionProperties(
+            active=True,
+            wait_for_fillers=True,
+            fillers={
+                "default": [
+                    "Cancelling your appointment...",
+                    "Processing cancellation..."
+                ]
+            }
+        ),
+        customer_id=SWAIGArgument(type="string", description="The customer's account ID", required=True),
+        appointment_id=SWAIGArgument(type="integer", description="The appointment ID to cancel", required=True),
+        meta_data=SWAIGArgument(type="object", description="Additional metadata", required=False),
+        meta_data_token=SWAIGArgument(type="string", description="Metadata token", required=False)
+    )
+    def cancel_appointment(customer_id, appointment_id, meta_data=None, meta_data_token=None):
+        try:
+            db = get_db()
+            appointment = db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', (appointment_id, customer_id)).fetchone()
+            if not appointment or appointment['status'] != 'scheduled':
+                return "Appointment not found or cannot be cancelled.", []
+            db.execute('''
+                UPDATE appointments 
+                SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (appointment_id,))
+            if request.is_json and request.json:
+                reason = request.json.get('reason', 'Customer requested cancellation')
+            else:
+                reason = 'Customer requested cancellation'
+            db.execute('''
+                INSERT INTO appointment_history (appointment_id, action, details, created_at)
+                VALUES (?, 'cancelled', ?, CURRENT_TIMESTAMP)
+            ''', (appointment_id, json.dumps({
+                'job_number': appointment['job_number'],
+                'reason': reason
+            })))
+            db.commit()
+            db.close()
+            return f"Appointment {appointment_id} cancelled.", []
+        except Exception as e:
+            app.logger.error(f"Error in cancel_appointment: {str(e)}")
+            return "Error cancelling appointment.", []
+
+    def format_mac_address(mac_address):
+        """Format MAC address to XX:XX:XX:XX:XX:XX format."""
+        # Remove any non-alphanumeric characters
+        mac = ''.join(c for c in mac_address if c.isalnum())
+        # Ensure we have exactly 12 characters
+        if len(mac) != 12:
+            return None
+        # Format with colons
+        return ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+
+    @swaig.endpoint(
+        "Swap the customer's modem",
+        SWAIGFunctionProperties(
+            active=True,
+            wait_for_fillers=True,
+            fillers={
+                "default": [
+                    "Processing modem swap...",
+                    "Updating modem information...",
+                    "Please wait while I update your modem..."
+                ]
+            }
+        ),
+        customer_id=SWAIGArgument(type="string", description="The customer's account ID", required=True),
+        make=SWAIGArgument(type="string", description="The make of the new modem (e.g., Motorola, Netgear)", required=True),
+        model=SWAIGArgument(type="string", description="The model of the new modem (e.g., MB8600, CM1000)", required=True),
+        mac_address=SWAIGArgument(type="string", description="The MAC address of the new modem (format: XX:XX:XX:XX:XX:XX)", required=True),
+        meta_data=SWAIGArgument(type="object", description="Additional metadata", required=False),
+        meta_data_token=SWAIGArgument(type="string", description="Metadata token", required=False)
+    )
+    def swap_modem(customer_id, make, model, mac_address, meta_data=None, meta_data_token=None):
         try:
             db = get_db()
             customer = db.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone()
             if not customer:
                 return "I couldn't find your account. Please verify your account number.", []
-            modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
-            if not modem:
-                return "No modem information found.", []
-            appointment_date = datetime.strptime(date, '%Y-%m-%d')
-            if appointment_date < datetime.now():
-                return "Please select a future date.", []
-            existing = db.execute('''
-                SELECT * FROM appointments 
-                WHERE customer_id = ? 
-                AND date(start_time) = date(?)
-            ''', (customer_id, appointment_date)).fetchone()
+            
+            # Format MAC address
+            formatted_mac = format_mac_address(mac_address)
+            if not formatted_mac:
+                return "Invalid MAC address. Please provide a valid 12-character MAC address.", []
+            
+            # Check if MAC address is already in use
+            existing = db.execute('SELECT * FROM modems WHERE mac_address = ? AND customer_id != ?', 
+                                (formatted_mac, customer_id)).fetchone()
             if existing:
-                return f"You already have an appointment on {date}.", []
+                return "This MAC address is already registered to another customer. Please provide a different MAC address.", []
+            
+            # Update modem information
             db.execute('''
-                INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes)
-                VALUES (?, 'modem_swap', 'scheduled', ?, ?, ?)
-            ''', (customer_id, appointment_date.strftime('%Y-%m-%d 10:00:00'), appointment_date.strftime('%Y-%m-%d 12:00:00'), f"Current MAC: {modem['mac_address']}"))
+                UPDATE modems 
+                SET make = ?, model = ?, mac_address = ?, last_updated = CURRENT_TIMESTAMP
+                WHERE customer_id = ?
+            ''', (make, model, formatted_mac, customer_id))
+            
+            # Log the modem swap
+            db.execute('''
+                INSERT INTO modem_history (customer_id, action, details, created_at)
+                VALUES (?, 'swap', ?, CURRENT_TIMESTAMP)
+            ''', (customer_id, json.dumps({
+                'make': make,
+                'model': model,
+                'mac_address': formatted_mac
+            })))
+            
             db.commit()
+            
+            # Get updated modem info
+            modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (customer_id,)).fetchone()
             db.close()
-            return f"Modem swap scheduled for {date}. A technician will assist you.", []
-        except ValueError:
-            return "Invalid date format. Use YYYY-MM-DD.", []
+            
+            return f"Modem information updated successfully. Your new modem is a {make} {model} with MAC address {formatted_mac}.", []
+            
         except Exception as e:
-            logger.error(f"Error in swap_modem: {str(e)}")
-            return "Error scheduling modem swap.", []
+            app.logger.error(f"Error in swap_modem: {str(e)}")
+            return "Error updating modem information.", []
+
+# Add template filters
+@app.template_filter('status_color')
+def status_color(status):
+    colors = {
+        'scheduled': 'primary',
+        'completed': 'success',
+        'cancelled': 'danger',
+        'pending': 'warning'
+    }
+    return colors.get(status.lower(), 'secondary')
 
 # Initialize and register endpoints
 initialize_signalwire()
-if swaig:
-    register_swaig_endpoints()
 
 # Environment Configuration
 HOST = '0.0.0.0'
@@ -350,14 +632,15 @@ HTTP_PASSWORD={request.form['httpPassword']}
 SIGNALWIRE_PROJECT_ID={request.form['signalwireProjectId']}
 SIGNALWIRE_TOKEN={request.form['signalwireToken']}
 SIGNALWIRE_SPACE={request.form['signalwireSpace']}
+FROM_NUMBER={request.form['fromNumber']}
 PORT=8080
 """
         with open('.env', 'w') as f:
             f.write(env_content)
-        logger.info("Generated .env file")
+        app.logger.info("Generated .env file")
         flash('Configuration saved! Restart the app to apply changes.', 'success')
     except Exception as e:
-        logger.error(f"Error generating .env: {str(e)}")
+        app.logger.error(f"Error generating .env: {str(e)}")
         flash('Failed to save configuration.', 'danger')
     return redirect(url_for('index'))
 
@@ -369,9 +652,16 @@ def swaig_endpoint():
     return Response(resp_body, mimetype='application/json')
 
 def get_db():
-    db = sqlite3.connect('zen_cable.db')
-    db.row_factory = sqlite3.Row
-    return db
+    if 'db' not in g:
+        g.db = sqlite3.connect('zen_cable.db')
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+@app.teardown_appcontext
+def close_db(error):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
 
 def init_db_if_needed():
     try:
@@ -465,6 +755,24 @@ def dashboard():
         ORDER BY due_date DESC LIMIT 1
     ''', (session['customer_id'],)).fetchone()
     db.close()
+    
+    # Create a default billing object if none exists
+    if not billing:
+        billing = {
+            'amount': 0.00,
+            'due_date': datetime.now().strftime('%Y-%m-%d'),
+            'status': 'no_billing'
+        }
+    
+    # Create a default modem object if none exists
+    if not modem:
+        modem = {
+            'status': 'offline',
+            'mac_address': 'No modem registered',
+            'make': 'Unknown',
+            'model': 'Unknown'
+        }
+    
     return render_template('dashboard.html', customer=customer, services=services, modem=modem, billing=billing)
 
 @app.route('/api/modem/status', methods=['GET'])
@@ -576,185 +884,55 @@ def get_appointments():
         'pagination': {'total': total, 'page': page, 'per_page': per_page, 'total_pages': (total + per_page - 1) // per_page}
     })
 
-@app.route('/api/appointments', methods=['POST'])
+@app.route('/appointments')
 @login_required
-def create_appointment():
-    data = request.json or {}
-    required_fields = ['type', 'date']
-    if not all(field in data for field in required_fields):
-        return jsonify({'error': 'Missing required fields'}), 400
-    valid_types = ['installation', 'repair', 'upgrade', 'modem_swap']
-    if data['type'] not in valid_types:
-        return jsonify({'error': f'Invalid type: {valid_types}'}), 400
-    try:
-        appointment_date = datetime.strptime(data['date'], '%Y-%m-%d')
-        if appointment_date < datetime.now():
-            return jsonify({'error': 'Cannot schedule past appointments'}), 400
-    except ValueError:
-        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+def appointments():
     db = get_db()
-    if db.execute('SELECT * FROM appointments WHERE customer_id = ? AND date(start_time) = date(?)', 
-                  (session['customer_id'], data['date'])).fetchone():
-        return jsonify({'error': f'Appointment already scheduled for {data["date"]}'}), 400
-    try:
-        cursor = db.execute('''
-            INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes, priority, technician_id, location)
-            VALUES (?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)
-        ''', (session['customer_id'], data['type'], appointment_date.strftime('%Y-%m-%d 09:00:00'), 
-              appointment_date.strftime('%Y-%m-%d 11:00:00'), data.get('notes', ''), data.get('priority', 'medium'), 
-              data.get('technician_id'), data.get('location', '')))
-        db.commit()
-        appointment = db.execute('SELECT * FROM appointments WHERE id = ?', (cursor.lastrowid,)).fetchone()
-        log_appointment_history(appointment['id'], 'created', {'type': appointment['type'], 'date': appointment['start_time'], 
-                                                              'notes': appointment['notes'], 'priority': appointment['priority']})
-        schedule_reminders(dict(appointment))
-        db.close()
-        return jsonify(dict(appointment)), 201
-    except Exception as e:
-        logger.error(f"Error creating appointment: {str(e)}")
-        return jsonify({'error': 'Failed to create appointment'}), 500
-
-@app.route('/api/appointments/<int:appointment_id>', methods=['PUT'])
-@login_required
-def update_appointment(appointment_id):
-    data = request.json or {}
-    db = get_db()
-    appointment = db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', 
-                            (appointment_id, session['customer_id'])).fetchone()
-    if not appointment:
-        return jsonify({'error': 'Appointment not found'}), 404
-    if 'status' in data and data['status'] not in ['scheduled', 'completed', 'cancelled', 'pending']:
-        return jsonify({'error': 'Invalid status'}), 400
-    if 'date' in data:
-        try:
-            new_date = datetime.strptime(data['date'], '%Y-%m-%d')
-            if new_date < datetime.now():
-                return jsonify({'error': 'Cannot schedule past appointments'}), 400
-            if db.execute('SELECT * FROM appointments WHERE customer_id = ? AND date(start_time) = date(?) AND id != ?', 
-                          (session['customer_id'], data['date'], appointment_id)).fetchone():
-                return jsonify({'error': f'Another appointment exists on {data["date"]}'}), 400
-        except ValueError:
-            return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
-    update_fields, params = [], []
-    if 'status' in data:
-        update_fields.append('status = ?')
-        params.append(data['status'])
-    if 'date' in data:
-        update_fields.extend(['start_time = ?', 'end_time = ?'])
-        params.extend([new_date.strftime('%Y-%m-%d 09:00:00'), new_date.strftime('%Y-%m-%d 11:00:00')])
-    if 'notes' in data:
-        update_fields.append('notes = ?')
-        params.append(data['notes'])
-    if 'priority' in data and data['priority'] in ['low', 'medium', 'high', 'urgent']:
-        update_fields.append('priority = ?')
-        params.append(data['priority'])
-    if 'technician_id' in data:
-        update_fields.append('technician_id = ?')
-        params.append(data['technician_id'])
-    if 'location' in data:
-        update_fields.append('location = ?')
-        params.append(data['location'])
-    if update_fields:
-        try:
-            db.execute(f'UPDATE appointments SET {", ".join(update_fields)} WHERE id = ? AND customer_id = ?', 
-                       params + [appointment_id, session['customer_id']])
-            db.commit()
-            log_appointment_history(appointment_id, 'updated', {k: v for k, v in data.items() 
-                                                               if k in ['status', 'date', 'notes', 'priority', 'technician_id', 'location']})
-            if 'date' in data:
-                updated = db.execute('SELECT * FROM appointments WHERE id = ?', (appointment_id,)).fetchone()
-                schedule_reminders(dict(updated))
-            updated = db.execute('SELECT * FROM appointments WHERE id = ?', (appointment_id,)).fetchone()
-            db.close()
-            return jsonify(dict(updated))
-        except Exception as e:
-            logger.error(f"Error updating appointment: {str(e)}")
-            return jsonify({'error': 'Failed to update appointment'}), 500
+    # Get all appointments for the customer
+    appointments = db.execute('''
+        SELECT a.*, t.name as technician_name
+        FROM appointments a
+        LEFT JOIN technicians t ON a.technician_id = t.id
+        WHERE a.customer_id = ?
+        ORDER BY a.start_time DESC
+    ''', (session['customer_id'],)).fetchall()
+    # Fetch customer details to include in the template context
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
     db.close()
-    return jsonify({'message': 'No changes made'}), 200
+    
+    return render_template('appointments.html', appointments=appointments, customer=customer)
 
-@app.route('/api/appointments/<int:appointment_id>', methods=['DELETE'])
+@app.route('/billing')
 @login_required
-def delete_appointment(appointment_id):
+def billing():
     db = get_db()
-    appointment = db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', 
-                            (appointment_id, session['customer_id'])).fetchone()
-    if not appointment:
-        return jsonify({'error': 'Appointment not found'}), 404
-    if datetime.strptime(appointment['start_time'], '%Y-%m-%d %H:%M:%S') < datetime.now():
-        return jsonify({'error': 'Cannot delete past appointments'}), 400
-    try:
-        log_appointment_history(appointment_id, 'deleted', {'type': appointment['type'], 'date': appointment['start_time'], 
-                                                           'reason': request.json.get('reason', 'No reason provided') if request.json else 'No reason provided'})
-        db.execute('DELETE FROM appointments WHERE id = ?', (appointment_id,))
-        db.commit()
-        db.close()
-        return '', 204
-    except Exception as e:
-        logger.error(f"Error deleting appointment: {str(e)}")
-        return jsonify({'error': 'Failed to delete appointment'}), 500
-
-@app.route('/api/appointments/<int:appointment_id>/history', methods=['GET'])
-@login_required
-def get_appointment_history(appointment_id):
-    db = get_db()
-    if not db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', 
-                      (appointment_id, session['customer_id'])).fetchone():
-        return jsonify({'error': 'Appointment not found'}), 404
-    history = db.execute('SELECT * FROM appointment_history WHERE appointment_id = ? ORDER BY created_at DESC', 
-                        (appointment_id,)).fetchall()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
+    current_balance = db.execute('''
+        SELECT amount, due_date FROM billing 
+        WHERE customer_id = ? 
+        ORDER BY due_date DESC LIMIT 1
+    ''', (session['customer_id'],)).fetchone()
+    payment_methods = db.execute('''
+        SELECT * FROM payment_methods 
+        WHERE customer_id = ?
+    ''', (session['customer_id'],)).fetchall()
+    payment_history = db.execute('''
+        SELECT * FROM payments 
+        WHERE customer_id = ? 
+        ORDER BY payment_date DESC
+    ''', (session['customer_id'],)).fetchall()
     db.close()
-    return jsonify([dict(h) for h in history])
-
-@app.route('/api/appointments/<int:appointment_id>/reminders', methods=['GET'])
-@login_required
-def get_appointment_reminders(appointment_id):
-    db = get_db()
-    if not db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', 
-                      (appointment_id, session['customer_id'])).fetchone():
-        return jsonify({'error': 'Appointment not found'}), 404
-    reminders = db.execute('SELECT * FROM appointment_reminders WHERE appointment_id = ? ORDER BY sent_at DESC', 
-                          (appointment_id,)).fetchall()
-    db.close()
-    return jsonify([dict(r) for r in reminders])
-
-@app.route('/api/appointments/<int:appointment_id>/reminders', methods=['POST'])
-@login_required
-def send_appointment_reminder_now(appointment_id):
-    if not signalwire_client:
-        return jsonify({'error': 'Service unavailable'}), 503
-    db = get_db()
-    appointment = db.execute('SELECT * FROM appointments WHERE id = ? AND customer_id = ?', 
-                            (appointment_id, session['customer_id'])).fetchone()
-    if not appointment:
-        return jsonify({'error': 'Appointment not found'}), 404
-    reminder_type = request.json.get('type', 'sms') if request.json else 'sms'
-    if reminder_type not in ['sms', 'call']:
-        return jsonify({'error': 'Invalid reminder type'}), 400
-    success = send_appointment_reminder(dict(appointment), reminder_type)
-    db.close()
-    return jsonify({'message': f'{reminder_type.upper()} reminder sent'}) if success else jsonify({'error': 'Failed to send reminder'}), 500
-
-@app.route('/reminder_call/<int:appointment_id>', methods=['POST'])
-def reminder_call(appointment_id):
-    if not signalwire_client:
-        return jsonify({'error': 'Service unavailable'}), 503
-    db = get_db()
-    appointment = db.execute('SELECT * FROM appointments WHERE id = ?', (appointment_id,)).fetchone()
-    if not appointment:
-        return jsonify({'error': 'Appointment not found'}), 404
-    customer = db.execute('SELECT * FROM customers WHERE id = ?', (appointment['customer_id'],)).fetchone()
-    if not customer:
-        return jsonify({'error': 'Customer not found'}), 404
-    appointment_time = datetime.strptime(appointment['start_time'], '%Y-%m-%d %H:%M:%S')
-    formatted_time = appointment_time.strftime('%B %d, %Y at %I:%M %p')
-    response = VoiceResponse()
-    response.say(f"""
-        Hello, this is a reminder for your {appointment['type']} appointment on {formatted_time}.
-        Call 1-800-ZEN-CABLE to reschedule if needed. Thank you for choosing Zen Cable.
-    """)
-    db.close()
-    return str(response)
+    
+    # Handle case when current_balance is None
+    balance_amount = current_balance['amount'] if current_balance else 0
+    due_date = current_balance['due_date'] if current_balance else datetime.now()
+    
+    return render_template('billing.html', 
+                         customer=customer,
+                         current_balance=balance_amount,
+                         due_date=due_date,
+                         payment_methods=payment_methods,
+                         payment_history=payment_history)
 
 @app.route('/api/modem/status', methods=['POST'])
 @login_required
@@ -774,27 +952,84 @@ def modem_status():
                           (status, session['customer_id']))
                 db.commit()
         except Exception as e:
-            logger.error(f"Error updating modem status: {str(e)}")
+            app.logger.error(f"Error updating modem status: {str(e)}")
             return jsonify({'error': 'Failed to update modem status'}), 500
     modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (session['customer_id'],)).fetchone()
     db.close()
     return jsonify(dict(modem)) if modem else jsonify({'error': 'Modem not found'}), 404
 
-def simulate_modem_reboot(customer_id):
+@app.route('/api/modem/swap', methods=['POST'])
+@login_required
+def swap_modem():
+    if not request.json:
+        return jsonify({'error': 'No data provided'}), 400
+    
+    required_fields = ['make', 'model', 'mac_address']
+    if not all(field in request.json for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    make = request.json['make'].strip()
+    model = request.json['model'].strip()
+    mac_address = request.json['mac_address'].strip()
+    
+    # Validate MAC address format
+    import re
+    if not re.match(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', mac_address):
+        return jsonify({'error': 'Invalid MAC address format'}), 400
+    
     db = get_db()
     try:
-        db.execute('UPDATE modems SET status = "rebooting", last_seen = CURRENT_TIMESTAMP WHERE customer_id = ?', (customer_id,))
+        # Check if MAC address is already in use
+        existing = db.execute('SELECT * FROM modems WHERE mac_address = ? AND customer_id != ?', 
+                            (mac_address, session['customer_id'])).fetchone()
+        if existing:
+            return jsonify({'error': 'This MAC address is already registered to another customer'}), 400
+        
+        # Update modem information
+        db.execute('''
+            UPDATE modems 
+            SET make = ?, model = ?, mac_address = ?, last_updated = CURRENT_TIMESTAMP
+            WHERE customer_id = ?
+        ''', (make, model, mac_address, session['customer_id']))
+        
+        # Log the modem swap
+        db.execute('''
+            INSERT INTO modem_history (customer_id, action, details, created_at)
+            VALUES (?, 'swap', ?, CURRENT_TIMESTAMP)
+        ''', (session['customer_id'], json.dumps({
+            'make': make,
+            'model': model,
+            'mac_address': mac_address
+        })))
+        
         db.commit()
-        time.sleep(30)
-        db.execute('UPDATE modems SET status = "online", last_seen = CURRENT_TIMESTAMP WHERE customer_id = ?', (customer_id,))
-        db.commit()
-    except Exception as e:
-        logger.error(f"Error in modem reboot simulation: {str(e)}")
-    finally:
+        
+        # Get updated modem info
+        modem = db.execute('SELECT * FROM modems WHERE customer_id = ?', (session['customer_id'],)).fetchone()
         db.close()
+        
+        return jsonify(dict(modem))
+        
+    except Exception as e:
+        app.logger.error(f"Error swapping modem: {str(e)}")
+        return jsonify({'error': 'Failed to update modem information'}), 500
+
+def simulate_modem_reboot(customer_id):
+    with app.app_context():
+        db = get_db()
+        try:
+            db.execute('UPDATE modems SET status = "rebooting", last_seen = CURRENT_TIMESTAMP WHERE customer_id = ?', (customer_id,))
+            db.commit()
+            time.sleep(30)
+            db.execute('UPDATE modems SET status = "online", last_seen = CURRENT_TIMESTAMP WHERE customer_id = ?', (customer_id,))
+            db.commit()
+        except Exception as e:
+            app.logger.error(f"Error in modem reboot simulation: {str(e)}")
+        finally:
+            db.close()
 
 def send_appointment_reminder(appointment, reminder_type='sms'):
-    if not signalwire_client:
+    if not signalwire_client or not FROM_NUMBER:
         return False
     db = get_db()
     try:
@@ -805,22 +1040,22 @@ def send_appointment_reminder(appointment, reminder_type='sms'):
         formatted_time = appointment_time.strftime('%B %d, %Y at %I:%M %p')
         message = f"Reminder: Your {appointment['type']} appointment is on {formatted_time}. Call 1-800-ZEN-CABLE to reschedule."
         if reminder_type == 'sms':
-            signalwire_client.messages.create(to=customer['phone'], from_='+1800ZENCABLE', body=message)
+            signalwire_client.messages.create(to=customer['phone'], from_=FROM_NUMBER, body=message)
         else:
-            signalwire_client.calls.create(to=customer['phone'], from_='+1800Z AgrawalENCABLE', 
+            signalwire_client.calls.create(to=customer['phone'], from_=FROM_NUMBER, 
                                          url=f"{request.host_url}reminder_call/{appointment['id']}")
         db.execute('INSERT INTO appointment_reminders (appointment_id, reminder_type, sent_at, status) VALUES (?, ?, CURRENT_TIMESTAMP, "sent")', 
                   (appointment['id'], reminder_type))
         db.commit()
         return True
     except Exception as e:
-        logger.error(f"Error sending {reminder_type} reminder: {str(e)}")
+        app.logger.error(f"Error sending {reminder_type} reminder: {str(e)}")
         return False
     finally:
         db.close()
 
 def schedule_reminders(appointment):
-    if not signalwire_client:
+    if not signalwire_client or not FROM_NUMBER:
         return
     appointment_time = datetime.strptime(appointment['start_time'], '%Y-%m-%d %H:%M:%S')
     sms_time = appointment_time - timedelta(hours=24)
@@ -837,17 +1072,580 @@ def log_appointment_history(appointment_id, action, details):
                   (appointment_id, action, json.dumps(details)))
         db.commit()
     except Exception as e:
-        logger.error(f"Error logging history: {str(e)}")
+        app.logger.error(f"Error logging history: {str(e)}")
     finally:
         db.close()
 
+@app.route('/settings')
+@login_required
+def settings():
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
+    db.close()
+    return render_template('settings.html', customer=customer)
+
+@app.route('/api/profile', methods=['PUT'])
+@login_required
+def update_profile():
+    if not request.json:
+        return jsonify({'error': 'No data provided'}), 400
+    
+    required_fields = ['first_name', 'last_name', 'phone', 'address']
+    if not all(field in request.json for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    db = get_db()
+    try:
+        db.execute('''
+            UPDATE customers 
+            SET first_name = ?, last_name = ?, phone = ?, address = ?
+            WHERE id = ?
+        ''', (request.json['first_name'], request.json['last_name'], 
+              request.json['phone'], request.json['address'], 
+              session['customer_id']))
+        db.commit()
+        customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
+        db.close()
+        return jsonify(dict(customer))
+    except Exception as e:
+        app.logger.error(f"Error updating profile: {str(e)}")
+        return jsonify({'error': 'Failed to update profile'}), 500
+
+@app.route('/api/password', methods=['PUT'])
+@login_required
+def change_password():
+    if not request.json:
+        return jsonify({'error': 'No data provided'}), 400
+    
+    required_fields = ['current_password', 'new_password']
+    if not all(field in request.json for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
+    
+    if not verify_password(request.json['current_password'], customer['password_hash'], customer['password_salt']):
+        return jsonify({'error': 'Current password is incorrect'}), 400
+    
+    try:
+        password_hash, password_salt = hash_password(request.json['new_password'])
+        db.execute('''
+            UPDATE customers 
+            SET password_hash = ?, password_salt = ?
+            WHERE id = ?
+        ''', (password_hash, password_salt, session['customer_id']))
+        db.commit()
+        db.close()
+        return jsonify({'message': 'Password updated successfully'})
+    except Exception as e:
+        app.logger.error(f"Error changing password: {str(e)}")
+        return jsonify({'error': 'Failed to change password'}), 500
+
+@app.route('/api/password/reset/initiate', methods=['POST'])
+def initiate_password_reset():
+    if not (SIGNALWIRE_PROJECT_ID and SIGNALWIRE_TOKEN and SIGNALWIRE_SPACE and FROM_NUMBER):
+        return jsonify({'error': 'SignalWire client not initialized'}), 503
+    data = request.get_json() or {}
+    email = data.get('email')
+    if not email:
+        return jsonify({'error': 'Email is required'}), 400
+    db = get_db()
+    customer = db.execute('SELECT * FROM customers WHERE email = ?', (email,)).fetchone()
+    db.close()
+    if not customer or not customer['phone']:
+        return jsonify({'error': 'No valid phone number found for this account'}), 400
+    if not validate_phone(customer['phone']):
+        return jsonify({'error': 'Invalid phone number format for this account.'}), 400
+    try:
+        mfa_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/relay/rest/mfa/sms"
+        payload = {
+            "to": customer['phone'],
+            "from": FROM_NUMBER,
+            "message": "Your Zen Cable password reset code is: {{code}}. This code will expire in 5 minutes.",
+            "token_length": 6,
+            "max_attempts": 3,
+            "allow_alphas": False,
+            "valid_for": 300
+        }
+        response = requests.post(
+            mfa_url,
+            json=payload,
+            auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+            headers={"Content-Type": "application/json"}
+        )
+        response.raise_for_status()
+        mfa_data = response.json()
+        mfa_id = mfa_data.get("id")
+        if not mfa_id:
+            return jsonify({'error': 'Failed to generate verification code'}), 500
+        session['password_reset_mfa_id'] = mfa_id
+        session['password_reset_customer_id'] = customer['id']
+        return jsonify({'message': 'Verification code sent', 'mfa_id': mfa_id})
+    except Exception as e:
+        app.logger.error(f"Error initiating password reset: {str(e)}")
+        return jsonify({'error': 'Failed to send verification code'}), 500
+
+@app.route('/api/verify-mfa', methods=['POST'])
+def verify_mfa():
+    print(f"[MFA VERIFY] Session contents at start: {dict(session)}")
+    if not (SIGNALWIRE_PROJECT_ID and SIGNALWIRE_TOKEN and SIGNALWIRE_SPACE):
+        print("[MFA VERIFY] SignalWire client not initialized")
+        return jsonify({'error': 'SignalWire client not initialized'}), 503
+    if session.get('password_reset_verified'):
+        print("[MFA VERIFY] Attempted double verification.")
+        return jsonify({'error': 'MFA already verified for this session.'}), 400
+    data = request.json
+    code = data.get('code')
+    mfa_id = session.get('password_reset_mfa_id')
+    print(f"[MFA VERIFY] Received code: {code}, MFA ID: {mfa_id}")
+    if not code or not mfa_id:
+        print("[MFA VERIFY] No code or MFA session found")
+        return jsonify({'error': 'No code or MFA session found'}), 400
+    try:
+        verify_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/relay/rest/mfa/{mfa_id}/verify"
+        payload = {"token": code}
+        print(f"[MFA VERIFY] Sending POST to {verify_url} with payload: {payload}")
+        response = requests.post(
+            verify_url,
+            json=payload,
+            auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+            headers={"Content-Type": "application/json"}
+        )
+        print(f"[MFA VERIFY] Response status: {response.status_code}")
+        print(f"[MFA VERIFY] Response body: {response.text}")
+        if response.status_code == 404:
+            print("[MFA VERIFY] 404 Not Found: MFA code expired, already used, or invalid session.")
+            return jsonify({'error': 'MFA code expired, already used, or invalid session.'}), 400
+        response.raise_for_status()
+        verify_data = response.json()
+        if verify_data.get("success"):
+            print("[MFA VERIFY] Success!")
+            session['password_reset_verified'] = True
+            session['password_reset_id'] = mfa_id  # Set this for the complete_password_reset endpoint
+            return jsonify({'success': True})
+        else:
+            print(f"[MFA VERIFY] Failure: {verify_data.get('message', 'Invalid code')}")
+            return jsonify({'error': verify_data.get('message', 'Invalid code')}), 400
+    except Exception as e:
+        print(f"[MFA VERIFY] Exception: {str(e)}")
+        app.logger.error(f"Error verifying MFA code: {str(e)}")
+        return jsonify({'error': 'Failed to verify code'}), 500
+
+@app.route('/api/password/reset/complete', methods=['POST'])
+def complete_password_reset():
+    if not session.get('password_reset_verified'):
+        return jsonify({'error': 'Please verify your identity first'}), 400
+    
+    if not request.json or 'new_password' not in request.json:
+        return jsonify({'error': 'No new password provided'}), 400
+    
+    customer_id = session.get('password_reset_customer_id')
+    if not customer_id:
+        return jsonify({'error': 'Invalid reset session'}), 401
+    
+    db = get_db()
+    try:
+        # Update the password
+        password_hash, password_salt = hash_password(request.json['new_password'])
+        db.execute('''
+            UPDATE customers 
+            SET password_hash = ?, password_salt = ?
+            WHERE id = ?
+        ''', (password_hash, password_salt, customer_id))
+        
+        # Clear used reset tokens
+        db.execute('DELETE FROM password_resets WHERE customer_id = ?', (customer_id,))
+        
+        db.commit()
+        db.close()
+        
+        # Clear session data
+        session.pop('password_reset_verified', None)
+        session.pop('password_reset_mfa_id', None)
+        session.pop('password_reset_id', None)
+        session.pop('password_reset_customer_id', None)
+        
+        return jsonify({'message': 'Password reset successfully'})
+    except Exception as e:
+        app.logger.error(f"Error completing password reset: {str(e)}")
+        return jsonify({'error': 'Failed to reset password'}), 500
+
+@app.route('/api/appointments/<int:appointment_id>', methods=['GET'])
+@login_required
+def get_appointment(appointment_id):
+    db = get_db()
+    appointment = db.execute('''
+        SELECT a.*, t.name as technician_name
+        FROM appointments a
+        LEFT JOIN technicians t ON a.technician_id = t.id
+        WHERE a.id = ? AND a.customer_id = ?
+    ''', (appointment_id, session['customer_id'])).fetchone()
+    include_history = request.args.get('include_history', 'false').lower() == 'true'
+    history = []
+    if appointment and include_history:
+        history_rows = db.execute('SELECT * FROM appointment_history WHERE appointment_id = ? ORDER BY created_at DESC', (appointment_id,)).fetchall()
+        history = [dict(h) for h in history_rows]
+    db.close()
+    if appointment:
+        appt_dict = dict(appointment)
+        if include_history:
+            appt_dict['history'] = history
+        return jsonify(appt_dict)
+    return jsonify({'error': 'Appointment not found'}), 404
+
+@app.route('/api/appointments/<int:appointment_id>/cancel', methods=['POST'])
+@login_required
+def cancel_appointment(appointment_id):
+    db = get_db()
+    try:
+        # Get the appointment
+        appointment = db.execute('''
+            SELECT a.*, t.name as technician_name
+            FROM appointments a
+            LEFT JOIN technicians t ON a.technician_id = t.id
+            WHERE a.id = ? AND a.customer_id = ?
+        ''', (appointment_id, session['customer_id'])).fetchone()
+        
+        if not appointment:
+            return jsonify({'error': 'Appointment not found'}), 404
+        
+        if appointment['status'] == 'cancelled':
+            return jsonify({'error': 'Appointment is already cancelled'}), 400
+        
+        # Update appointment status
+        db.execute('''
+            UPDATE appointments 
+            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (appointment_id,))
+        
+        # Log the cancellation
+        if request.is_json and request.json:
+            reason = request.json.get('reason', 'Customer requested cancellation')
+        else:
+            reason = 'Customer requested cancellation'
+        db.execute('''
+            INSERT INTO appointment_history (appointment_id, action, details, created_at)
+            VALUES (?, 'cancelled', ?, CURRENT_TIMESTAMP)
+        ''', (appointment_id, json.dumps({
+            'job_number': appointment['job_number'],
+            'reason': reason
+        })))
+        
+        db.commit()
+        
+        # Get updated appointment
+        updated_appointment = db.execute('''
+            SELECT a.*, t.name as technician_name
+            FROM appointments a
+            LEFT JOIN technicians t ON a.technician_id = t.id
+            WHERE a.id = ?
+        ''', (appointment_id,)).fetchone()
+        
+        return jsonify({
+            'success': True,
+            'appointment': dict(updated_appointment)
+        })
+        
+    except Exception as e:
+        db.rollback()
+        app.logger.error(f"Error cancelling appointment: {str(e)}")
+        return jsonify({'error': 'Failed to cancel appointment'}), 500
+    finally:
+        db.close()
+
+def generate_job_number():
+    """Generate a unique 5-digit job number."""
+    db = get_db()
+    while True:
+        # Generate a random 5-digit number
+        job_number = str(random.randint(10000, 99999))
+        # Check if it exists
+        exists = db.execute('SELECT 1 FROM appointments WHERE job_number = ?', (job_number,)).fetchone()
+        if not exists:
+            return job_number
+
+@app.route('/api/appointments', methods=['POST'])
+@login_required
+def create_appointment():
+    if not request.json:
+        return jsonify({'error': 'No data provided'}), 400
+    
+    required_fields = ['type', 'date', 'time_slot']
+    if not all(field in request.json for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    db = get_db()
+    try:
+        # Validate appointment type
+        if request.json['type'] not in ['installation', 'repair', 'upgrade', 'modem_swap']:
+            return jsonify({'error': 'Invalid appointment type'}), 400
+        
+        # Validate time slot
+        if request.json['time_slot'] not in ['morning', 'afternoon', 'evening', 'all_day']:
+            return jsonify({'error': 'Invalid time slot'}), 400
+        
+        # Parse date
+        try:
+            appointment_date = datetime.strptime(request.json['date'], '%Y-%m-%d')
+            if appointment_date < datetime.now():
+                return jsonify({'error': 'Please select a future date'}), 400
+        except ValueError:
+            return jsonify({'error': 'Invalid date format'}), 400
+        
+        # Check for existing appointments
+        existing = db.execute('''
+            SELECT * FROM appointments 
+            WHERE customer_id = ? 
+            AND date(start_time) = date(?)
+        ''', (session['customer_id'], appointment_date)).fetchone()
+        
+        if existing:
+            return jsonify({'error': f'You already have an appointment on {request.json["date"]}'}), 400
+        
+        # Set time slots
+        time_slots = {
+            'morning': ('08:00 AM', '11:00 AM'),
+            'afternoon': ('02:00 PM', '04:00 PM'),
+            'evening': ('06:00 PM', '08:00 PM'),
+            'all_day': ('08:00 AM', '08:00 PM')
+        }
+        start_time, end_time = time_slots[request.json['time_slot']]
+        
+        # Check if time slot is available
+        slot_conflict = db.execute('''
+            SELECT * FROM appointments 
+            WHERE date(start_time) = date(?)
+            AND (
+                (start_time <= ? AND end_time > ?) OR
+                (start_time < ? AND end_time >= ?) OR
+                (start_time >= ? AND end_time <= ?)
+            )
+        ''', (appointment_date, 
+              f"{request.json['date']} {end_time}", f"{request.json['date']} {start_time}",
+              f"{request.json['date']} {end_time}", f"{request.json['date']} {start_time}",
+              f"{request.json['date']} {start_time}", f"{request.json['date']} {end_time}")).fetchone()
+        
+        if slot_conflict:
+            return jsonify({'error': f'The {request.json["time_slot"]} time slot on {request.json["date"]} is already booked'}), 400
+        
+        # Generate job number
+        job_number = generate_job_number()
+        
+        # Insert appointment
+        cursor = db.execute('''
+            INSERT INTO appointments (customer_id, type, status, start_time, end_time, notes, sms_reminder, job_number)
+            VALUES (?, ?, 'scheduled', ?, ?, ?, ?, ?)
+        ''', (session['customer_id'], 
+              request.json['type'],
+              f"{request.json['date']} {start_time}",
+              f"{request.json['date']} {end_time}",
+              request.json.get('notes', ''),
+              request.json.get('sms_reminder', True),
+              job_number))
+        
+        appointment_id = cursor.lastrowid
+        
+        # Get the created appointment
+        appointment = db.execute('''
+            SELECT a.*, t.name as technician_name
+            FROM appointments a
+            LEFT JOIN technicians t ON a.technician_id = t.id
+            WHERE a.id = ?
+        ''', (appointment_id,)).fetchone()
+        
+        db.commit()
+        
+        # Schedule reminders if enabled
+        if request.json.get('sms_reminder', True):
+            schedule_reminders(dict(appointment))
+        
+        return jsonify({
+            'success': True,
+            'appointment': dict(appointment)
+        })
+        
+    except Exception as e:
+        db.rollback()
+        app.logger.error(f"Error creating appointment: {str(e)}")
+        return jsonify({'error': 'Failed to create appointment'}), 500
+    finally:
+        db.close()
+
+@app.route('/api/appointments/<int:appointment_id>/reschedule', methods=['POST'])
+@login_required
+def reschedule_appointment(appointment_id):
+    if not request.json:
+        return jsonify({'error': 'No data provided'}), 400
+    required_fields = ['date', 'time_slot']
+    if not all(field in request.json for field in required_fields):
+        return jsonify({'error': 'Missing required fields'}), 400
+    db = get_db()
+    try:
+        # Validate time slot
+        if request.json['time_slot'] not in ['morning', 'afternoon', 'evening', 'all_day']:
+            return jsonify({'error': 'Invalid time slot'}), 400
+        # Parse date
+        try:
+            appointment_date = datetime.strptime(request.json['date'], '%Y-%m-%d')
+            if appointment_date < datetime.now():
+                return jsonify({'error': 'Please select a future date'}), 400
+        except ValueError:
+            return jsonify({'error': 'Invalid date format'}), 400
+        # Get the appointment
+        appointment = db.execute('''
+            SELECT a.*, t.name as technician_name
+            FROM appointments a
+            LEFT JOIN technicians t ON a.technician_id = t.id
+            WHERE a.id = ? AND a.customer_id = ?
+        ''', (appointment_id, session['customer_id'])).fetchone()
+        if not appointment:
+            return jsonify({'error': 'Appointment not found'}), 404
+        # Set time slots
+        time_slots = {
+            'morning': ('08:00 AM', '11:00 AM'),
+            'afternoon': ('02:00 PM', '04:00 PM'),
+            'evening': ('06:00 PM', '08:00 PM'),
+            'all_day': ('08:00 AM', '08:00 PM')
+        }
+        start_time, end_time = time_slots[request.json['time_slot']]
+        # Check for slot conflict
+        slot_conflict = db.execute('''
+            SELECT * FROM appointments 
+            WHERE customer_id = ? AND id != ? AND date(start_time) = date(?)
+            AND (
+                (start_time <= ? AND end_time > ?) OR
+                (start_time < ? AND end_time >= ?) OR
+                (start_time >= ? AND end_time <= ?)
+            )
+        ''', (session['customer_id'], appointment_id, appointment_date,
+              f"{request.json['date']} {end_time}", f"{request.json['date']} {start_time}",
+              f"{request.json['date']} {end_time}", f"{request.json['date']} {start_time}",
+              f"{request.json['date']} {start_time}", f"{request.json['date']} {end_time}")).fetchone()
+        if slot_conflict:
+            return jsonify({'error': f'The {request.json["time_slot"]} time slot is already booked'}), 400
+        # Update appointment
+        db.execute('''
+            UPDATE appointments 
+            SET start_time = ?, end_time = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (
+            f"{request.json['date']} {start_time}",
+            f"{request.json['date']} {end_time}",
+            request.json.get('notes', appointment['notes']),
+            appointment_id
+        ))
+        # Log the reschedule
+        db.execute('''
+            INSERT INTO appointment_history (appointment_id, action, details, created_at)
+            VALUES (?, 'rescheduled', ?, CURRENT_TIMESTAMP)
+        ''', (appointment_id, json.dumps({
+            'date': request.json['date'],
+            'time_slot': request.json['time_slot'],
+            'notes': request.json.get('notes', appointment['notes']),
+            'job_number': appointment['job_number']
+        })))
+        db.commit()
+        # Get updated appointment
+        updated_appointment = db.execute('''
+            SELECT a.*, t.name as technician_name
+            FROM appointments a
+            LEFT JOIN technicians t ON a.technician_id = t.id
+            WHERE a.id = ?
+        ''', (appointment_id,)).fetchone()
+        return jsonify({
+            'success': True,
+            'appointment': dict(updated_appointment)
+        })
+    except Exception as e:
+        db.rollback()
+        app.logger.error(f"Error rescheduling appointment: {str(e)}")
+        return jsonify({'error': 'Failed to reschedule appointment'}), 500
+    finally:
+        db.close()
+
+@app.route('/api/test-sms', methods=['POST'])
+def test_sms():
+    if not (SIGNALWIRE_PROJECT_ID and SIGNALWIRE_TOKEN and SIGNALWIRE_SPACE and FROM_NUMBER):
+        return jsonify({'error': 'SignalWire client not initialized'}), 503
+    if 'customer_id' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    db = sqlite3.connect('zen_cable.db')
+    db.row_factory = sqlite3.Row
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
+    if not customer:
+        return jsonify({'error': 'Customer not found'}), 404
+    try:
+        # Use the Compatibility API endpoint
+        compat_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{SIGNALWIRE_PROJECT_ID}/Messages.json"
+        payload = {
+            "From": FROM_NUMBER,
+            "To": customer['phone'],
+            "Body": "This is a test SMS from Zen Cable. Your phone number is working correctly!"
+        }
+        print(f"[Compat SMS] POST to {compat_url} with payload: {payload}")
+        response = requests.post(
+            compat_url,
+            data=payload,
+            auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        print(f"[Compat SMS] Response status: {response.status_code}")
+        print(f"[Compat SMS] Response body: {response.text}")
+        response.raise_for_status()
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"[Compat SMS] Exception: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/test-mfa', methods=['POST'])
+def test_mfa():
+    if not (SIGNALWIRE_PROJECT_ID and SIGNALWIRE_TOKEN and SIGNALWIRE_SPACE and FROM_NUMBER):
+        return jsonify({'error': 'SignalWire client not initialized'}), 503
+    if 'customer_id' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    db = sqlite3.connect('zen_cable.db')
+    db.row_factory = sqlite3.Row
+    customer = db.execute('SELECT * FROM customers WHERE id = ?', (session['customer_id'],)).fetchone()
+    if not customer:
+        return jsonify({'error': 'Customer not found'}), 404
+    try:
+        mfa_url = f"https://{SIGNALWIRE_SPACE}.signalwire.com/api/relay/rest/mfa/sms"
+        payload = {
+            "to": customer['phone'],
+            "from": FROM_NUMBER,
+            "message": "Your Zen Cable MFA test code is: {{code}}. This code will expire in 5 minutes.",
+            "token_length": 6,
+            "max_attempts": 3,
+            "allow_alphas": False,
+            "valid_for": 300
+        }
+        response = requests.post(
+            mfa_url,
+            json=payload,
+            auth=(SIGNALWIRE_PROJECT_ID, SIGNALWIRE_TOKEN),
+            headers={"Content-Type": "application/json"}
+        )
+        response.raise_for_status()
+        print(f"Test MFA code sent to {customer['phone']} via MFA REST endpoint.")
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"Error sending test MFA code via MFA REST endpoint: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.errorhandler(404)
+def not_found_error(error):
+    return jsonify({'error': 'Not found'}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    db = get_db()
+    db.rollback()
+    return jsonify({'error': 'Internal server error'}), 500
+
 if __name__ == '__main__':
-    print("\n" + "="*50)
-    print("Zen Cable Customer Portal")
-    print("="*50)
-    print("\nTest Credentials:\nEmail: test@example.com\nPassword: password123")
-    print(f"\nStarting server on {HOST}:{PORT} (Debug: {DEBUG})")
-    init_db_if_needed()
-    print(f"SWAIG endpoints: {list(swaig.functions.keys()) if swaig else 'None'}")
-    print(f"Listening on http://{HOST}:{PORT}")
-    app.run(host=HOST, port=PORT, debug=DEBUG)
+    setup_logging()
+    with app.app_context():
+        init_db_if_needed()
+        initialize_signalwire()
+    app.run(host='0.0.0.0', port=8080, debug=True)
